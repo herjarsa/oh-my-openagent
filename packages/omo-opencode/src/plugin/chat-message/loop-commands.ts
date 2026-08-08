@@ -1,6 +1,7 @@
-import type { OhMyOpenCodeConfig } from "../../config"
+﻿import type { OhMyOpenCodeConfig } from "../../config"
 
 import { detectSlashCommand, removeCodeBlocks } from "../../hooks/auto-slash-command/detector"
+import { AUTO_SLASH_COMMAND_TAG_OPEN } from "../../hooks/auto-slash-command/constants"
 import { parseGoalCommand } from "../../hooks/goal/command-arguments"
 import { checkObjective } from "../../hooks/goal/validation"
 import { log } from "../../shared"
@@ -20,9 +21,15 @@ export function handleGoalMessage(args: {
     return
   }
 
+  // Never treat an auto-slash-expanded payload (e.g. a skill body injected by the
+  // auto-slash command hook) as a goal objective. (#6591)
+  if (rawPromptText.includes(AUTO_SLASH_COMMAND_TAG_OPEN)) {
+    return
+  }
+
   // A `/goal ...` command typed as a chat message (fallback for when command.execute.before
   // did not intercept it). Only a genuine slash command drives the goal switch, parsed from
-  // the command arguments — a normal user message is never treated as an objective.
+  // the command arguments â€” a normal user message is never treated as an objective.
   const slashCommand = detectSlashCommand(rawPromptText)
   if (slashCommand?.command === "goal") {
     // Preserve multi-line objectives: the slash-command regex is not dotall, so re-derive the
