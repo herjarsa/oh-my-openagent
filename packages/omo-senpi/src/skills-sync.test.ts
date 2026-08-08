@@ -8,9 +8,11 @@ const skillsRoot = join(repoRoot, "packages", "omo-senpi", "plugin", "skills")
 const expectedSkillNames = [
   "ast-grep",
   "coding-agent-sessions",
+  "data-scientist",
   "debugging",
   "frontend",
   "git-master",
+  "give-me-tips",
   "hyperplan",
   "init-deep",
   "lsp-setup",
@@ -27,14 +29,16 @@ const expectedSkillNames = [
   "visual-qa",
 ] as const
 
-const CODEX_DERIVED_SKILL_NAMES: Record<string, true> = {
-  ultrawork: true,
-  "ulw-loop": true,
-}
+const CODEX_DERIVED_SKILL_NAMES: Record<string, true> = {}
 // Skills authored directly against the omo-senpi tool surface. They already speak native Senpi tools,
 // so they carry no OpenCode examples and need no "Senpi Harness Tool Compatibility" translation banner.
 const NATIVE_SENPI_SKILL_NAMES: Record<string, true> = {
+  "give-me-tips": true,
   hyperplan: true,
+  "init-deep": true,
+  ultrawork: true,
+  "ulw-loop": true,
+  "ulw-research": true,
 }
 const sharedSkillNames = expectedSkillNames.filter(
   (name) => !(name in CODEX_DERIVED_SKILL_NAMES) && !(name in NATIVE_SENPI_SKILL_NAMES),
@@ -90,7 +94,7 @@ function extractFrontmatterField(frontmatter: string, field: string): string | u
 }
 
 describe("OMO Senpi scoped skill sync", () => {
-  test("#given synced skill output #when inspected #then exactly 19 roots exist with valid names", () => {
+  test("#given synced skill output #when inspected #then exactly 20 roots exist with valid names", () => {
     const actualNames = listDirectoryNames(skillsRoot)
     expect(actualNames).toEqual([...expectedSkillNames].sort())
 
@@ -114,7 +118,7 @@ describe("OMO Senpi scoped skill sync", () => {
       const name = extractFrontmatterField(frontmatter, "name")
       expect(name, `${relative(repoRoot, skillFile)} frontmatter name must equal ${skillName}`).toBe(skillName)
 
-      const descriptionLine = frontmatter.match(/^description:\\s*(.*)$/m)?.[0] ?? ""
+      const descriptionLine = frontmatter.match(/^description:\s*(.*)$/m)?.[0] ?? ""
       expect(
         descriptionLine.length,
         `${relative(repoRoot, skillFile)} description line must be <= 1024 chars`,
@@ -122,10 +126,10 @@ describe("OMO Senpi scoped skill sync", () => {
     }
   })
 
-  test("#given codex-derived skill roots #when scanned #then no Codex or multi-agent harness guidance survives", () => {
+  test("#given codex-derived and native skill roots #when scanned #then no Codex or multi-agent harness guidance survives", () => {
     const leaks: string[] = []
 
-    for (const skillName of Object.keys(CODEX_DERIVED_SKILL_NAMES)) {
+    for (const skillName of [...Object.keys(CODEX_DERIVED_SKILL_NAMES), ...Object.keys(NATIVE_SENPI_SKILL_NAMES)]) {
       const skillRoot = join(skillsRoot, skillName)
       if (!existsSync(skillRoot)) continue
 
@@ -138,6 +142,22 @@ describe("OMO Senpi scoped skill sync", () => {
     }
 
     expect(leaks).toEqual([])
+  })
+
+  test("#given native senpi skills #when synced output is compared #then they ship verbatim modulo blank-line normalization and carry no compatibility banner", () => {
+    for (const skillName of Object.keys(NATIVE_SENPI_SKILL_NAMES)) {
+      const sourceFile = join(repoRoot, "packages", "omo-senpi", "skills", skillName, "SKILL.md")
+      expect(existsSync(sourceFile), `${relative(repoRoot, sourceFile)} must exist`).toBe(true)
+
+      const source = readFileSync(sourceFile, "utf8").replace(/\n{3,}/g, "\n\n")
+      const shippedPath = join(skillsRoot, skillName, "SKILL.md")
+      const shipped = readFileSync(shippedPath, "utf8")
+      expect(shipped, `${relative(repoRoot, shippedPath)} must ship the native source verbatim`).toBe(source)
+      expect(
+        shipped.includes(compatibilitySectionHeading),
+        `${skillName} is senpi-native and must not carry the compatibility banner`,
+      ).toBe(false)
+    }
   })
 
   test("#given shared skill roots with opencode orchestration #when inspected #then a Senpi compatibility section precedes the first example", () => {
@@ -171,6 +191,29 @@ describe("OMO Senpi scoped skill sync", () => {
   test("#given synced skill tree #when inspected #then no codex-only display metadata is packaged", () => {
     const openaiFiles = listFiles(skillsRoot).filter((file) => file.endsWith("agents/openai.yaml"))
     expect(openaiFiles.map((file) => relative(repoRoot, file))).toEqual([])
+  })
+
+  test("#given ported orchestration skills #when scanned #then no foreign-harness delegation guidance survives", () => {
+    const portedOrchestrationSkillNames = ["start-work", "ulw-plan"] as const
+    const foreignDelegationPattern = /\b(?:multi_agent|spawn_agent|lazycodex)\b/i
+    const leaks: string[] = []
+
+    for (const skillName of portedOrchestrationSkillNames) {
+      const skillRoot = join(skillsRoot, skillName)
+      if (!existsSync(skillRoot)) continue
+
+      for (const file of listFiles(skillRoot)) {
+        const content = readFileSync(file, "utf8")
+        if (foreignDelegationPattern.test(content)) {
+          leaks.push(`${relative(repoRoot, file)}: foreign delegation tool guidance`)
+        }
+        if (skillName === "ulw-plan" && /\boracle\b/i.test(content)) {
+          leaks.push(`${relative(repoRoot, file)}: oracle reviewer does not exist in omo-senpi`)
+        }
+      }
+    }
+
+    expect(leaks).toEqual([])
   })
 
   test("#given frontend skill #when inspected #then materialized design references exist", () => {

@@ -207,12 +207,16 @@ task(subagent_type="plan", load_skills=[], run_in_background=false, prompt="<gat
 
 **YOUR SELF-ASSESSMENT IS UNRELIABLE.** What feels like 95% confidence = ~60% actual correctness. Constraints in this prompt are NOT suggestions; they are HARD GATES. You may not skip any.
 
+### GOAL REGISTRATION (BINDING)
+
+When the `create_goal` tool exists, you MUST register the run's goal with it BEFORE any implementation: the full objective, the scenario contract below, and one line "I'll stop right away when <the exact observable state that ends this run>". Without the tool, record the same contract at the top of your TODO/notepad and treat it as binding.
+
 ### SCENARIO CONTRACT (binding, defined BEFORE coding)
 
-Define 3+ scenarios, each with a binary pass condition, the real surface that proves it, AND the test file+test id (test-first). Required classes:
-- **Happy path** (the main expected use)
-- **Edge** (boundary, empty, malformed, concurrent)
-- **Adjacent-surface regression** (callers, sibling endpoints, related modules)
+Define scenarios sized to the change — 1-2 for a small single-surface change, 3+ for risky or multi-surface work — each with a binary pass condition and the cheapest faithful proof: a test file+test id at a code seam (test-first), or the real-surface scenario itself when no seam exists (prose, docs, visual-only: review + real-surface QA, no test). Classes:
+- **Happy path** (always)
+- **Edge** (boundary, empty, malformed, concurrent — when risky)
+- **Adjacent-surface regression** (callers, sibling endpoints, related modules — when multi-surface)
 
 Scenarios are the contract. Done = every scenario PASSES with both artifacts (RED→GREEN proof AND real-surface artifact).
 
@@ -220,9 +224,9 @@ Scenarios are the contract. Done = every scenario PASSES with both artifacts (RE
 
 At start: `NOTE=$(mktemp -t ulw-$(date +%Y%m%d-%H%M%S).XXXXXX.md)`. Echo the path. APPEND-ONLY sections: Plan, Scenarios, Now, Todo, Findings (file:line), Learnings. If context is lost, re-read and resume — this is your only durable memory.
 
-### TDD (MANDATORY, NO EXCEPTIONS)
+### TDD (MANDATORY for code with a test seam)
 
-Every production change — features, fixes, refactors, perf, glue, config-with-logic — follows RED→GREEN→SURFACE.
+Every production code change — features, fixes, refactors, perf, glue, config-with-logic — follows RED→GREEN→SURFACE. Prose, docs, and visual-only changes have no seam: skip RED→GREEN, prove them through the surface channel.
 
 1. **RED**: Write the failing test FIRST. Run it. Capture the assertion message that proves it fails for the RIGHT reason (not syntax, not import). Paste RED output into the notepad. No production code yet.
 2. **GREEN**: Smallest change to flip RED→GREEN. Re-run, capture GREEN output. If GREEN required ~20+ lines, your test was too coarse — split it.
@@ -234,6 +238,10 @@ Every production change — features, fixes, refactors, perf, glue, config-with-
 **Exemption whitelist**: pure formatting, comment-only edits, version bumps with no behavior delta, rename-only moves. Each MUST be justified in writing. Unjustified exemption = rejection.
 
 **If you typed production code without a failing test preceding it: STOP, revert, write the test, watch it fail, then redo.** No exceptions — "obvious" / "one-liner" / "too small" do NOT exempt you.
+
+### COMMIT DISCIPLINE (MANDATORY)
+
+Commit frequently: one atomic commit per verified increment (RED→GREEN + evidence captured), never one end-of-run omnibus. BEFORE composing each message, study the history and mimic it — run `git log --oneline -20` plus `git log -5 -- <touched paths>` — matching subject shape, scope names, message language, body style, and typical commit size. Skip committing only when the user forbade commits this session.
 
 ### Evidence Gates
 

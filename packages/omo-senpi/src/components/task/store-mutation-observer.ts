@@ -14,6 +14,11 @@ export function createMutationNotifyingStore(backing: TaskRecordStore, onMutatio
       backing.replace(record)
       onMutation()
     },
+    mutate: (taskId, mutation) => {
+      const result = backing.mutate(taskId, mutation)
+      onMutation()
+      return result
+    },
     load: (taskId) => backing.load(taskId),
     list: () => backing.list(),
     appendEvent: (taskId, event) => backing.appendEvent(taskId, event),
@@ -26,5 +31,15 @@ export function createMutationNotifyingStore(backing: TaskRecordStore, onMutatio
       onMutation()
       return result
     },
+    tombstoneIfExpired: (taskId, shouldRetain) => {
+      const result = backing.tombstoneIfExpired(taskId, shouldRetain)
+      if (result.kind === "tombstoned") onMutation()
+      return result
+    },
+    completeExpunge: (taskId) => {
+      backing.completeExpunge(taskId)
+      onMutation()
+    },
+    listExpunging: () => backing.listExpunging(),
   }
 }

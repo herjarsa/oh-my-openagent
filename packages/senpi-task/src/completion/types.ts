@@ -1,4 +1,4 @@
-import type { TaskRecord, TaskStatus } from "../state"
+import type { ResolvedModelRecord, TaskRecord, TaskRunStats, TaskStatus } from "../state"
 import type { ListTaskRecordsResult, PersistedTaskEvent } from "../store"
 
 export type TransitionReason = "compacting" | "session_switching" | "session_shutdown"
@@ -20,9 +20,17 @@ export type CompletionDetails = {
   readonly task_id: string
   readonly name: string
   readonly status: TaskStatus
+  readonly category?: string
+  readonly agent_type?: string
+  readonly model: string
+  readonly requested_model?: ResolvedModelRecord
+  readonly fallback_models?: readonly ResolvedModelRecord[]
+  readonly resolved_model?: ResolvedModelRecord
   readonly duration_ms: number
   readonly tokens?: number
-  readonly final_response_head: string
+  readonly run_stats?: TaskRunStats
+  readonly final_response: string
+  readonly final_response_file?: string
   readonly continuation_hint: string
 }
 
@@ -48,6 +56,9 @@ export type CompletionNotifierStore = {
   readonly load: (taskId: string) => TaskRecord | null
   readonly list: () => ListTaskRecordsResult
   readonly replace: (record: TaskRecord) => void
+  // Locked re-read + conditional write. Notification bookkeeping MUST go through this so a
+  // concurrent residency/host_pid claim is never erased by a stale whole-record replace.
+  readonly mutate: (taskId: string, mutation: (record: TaskRecord) => TaskRecord) => TaskRecord | null
   readonly appendEvent: (taskId: string, event: PersistedTaskEvent) => string
 }
 
@@ -56,6 +67,7 @@ export type CompletionRetrySchedule = (fn: () => void, delayMs: number) => () =>
 export type CompletionNotifierDeps = {
   readonly notifier: ParentNotifier
   readonly store: CompletionNotifierStore
+  readonly stateDir?: string
   readonly schedule?: CompletionRetrySchedule
   readonly getParentState?: () => ParentState
   readonly getCurrentSessionId?: () => string | undefined
@@ -83,10 +95,13 @@ export type FlushInput = {
   readonly replaced: boolean
 }
 
-export type ReconcileFailedNotificationsInput = {
+export type ReconcileUnnotifiedNotificationsInput = {
   readonly sessionId: string
   readonly parentState: ParentState
 }
+
+/** @deprecated Pre-rename alias kept for the omo-senpi caller until todo 18 updates it. */
+export type ReconcileFailedNotificationsInput = ReconcileUnnotifiedNotificationsInput
 
 export type FlushResult =
   | { readonly kind: "flushed"; readonly count: number }
@@ -97,6 +112,8 @@ export type FlushResult =
 export type CompletionNotifier = {
   notifyTerminal(request: CompletionRequest): NotifyResult
   flushBuffered(input: FlushInput): FlushResult
-  reconcileFailedNotifications(input: ReconcileFailedNotificationsInput): void
+  reconcileUnnotifiedNotifications(input: ReconcileUnnotifiedNotificationsInput): void
+  /** Thin alias of reconcileUnnotifiedNotifications for the pre-rename omo-senpi caller (todo 18). */
+  reconcileFailedNotifications(input: ReconcileUnnotifiedNotificationsInput): void
   bufferedCount(sessionId: string): number
 }

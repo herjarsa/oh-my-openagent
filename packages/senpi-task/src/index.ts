@@ -1,5 +1,6 @@
 // allow: SIZE_OK - package-root public API barrel contains re-exports only and intentionally preserves one stable root import surface.
 export {
+  isSpawnSpecV1,
   RESIDENCY_STATES,
   RESOLVED_MODEL_SOURCES,
   TASK_STATUSES,
@@ -9,13 +10,18 @@ export {
   transitionTaskRecord,
 } from "./state"
 export type {
+  LegacyProcessSpawnSpec,
   Messageability,
+  PendingSteeringEntry,
   ResidencyState,
   ResolvedModelRecord,
   ResolvedModelSource,
+  SpawnSpecV1,
   TaskNotification,
   TaskRecord,
   TaskRecordInput,
+  TaskRunStats,
+  TaskSpawnSpec,
   TaskStatus,
   TaskTransition,
   TaskTransitionAudit,
@@ -29,6 +35,19 @@ export type {
   TaskRecordDiagnostic,
   TaskRecordStore,
 } from "./store"
+export {
+  composeStatusLine,
+  formatLiveSpend,
+  formatRunSpend,
+  formatStatusTarget,
+  formatTargetIdentity,
+  formatTargetWithModel,
+  taskIdentityLabel,
+  toolCountSuffix,
+} from "./status-line"
+export type { StatusLineInput, StatusLineStats, StatusTargetInput, TaskIdentityInput } from "./status-line"
+export { TASK_SUMMARY_MAX_LENGTH, clampTaskSummary } from "./task-summary"
+export { assistantLastLine, formatToolActivity } from "./progress"
 export { createMinimalSenpiResourceLoader } from "./senpi/minimal-resource-loader"
 export type { MinimalSenpiResourceLoaderOptions } from "./senpi/minimal-resource-loader"
 export {
@@ -175,10 +194,15 @@ export type {
   TrustedRespawnLaunchResolver,
 } from "./manager"
 export {
+  AGENT_INVOCATION_CONDITIONS,
   BUILTIN_AGENTS,
   BUILTIN_AGENT_DEFAULTS,
   CURATED_READONLY_AGENT_NAMES,
+  EMPTY_SKILL_INVOCATIONS,
+  PLAN_GATED_AGENT_NAMES,
   defineAgent,
+  evaluateInvocationGuard,
+  invocationConditionForAgent,
   loadAgents,
   mapOmoConfigAgents,
   registerAgent,
@@ -186,6 +210,9 @@ export {
   resolveToolRule,
 } from "./agents"
 export type {
+  AgentInvocationCondition,
+  AgentModelCandidate,
+  AgentModelEntry,
   AgentModelUnavailableResult,
   AgentNotFoundResult,
   AgentResolutionResult,
@@ -194,10 +221,12 @@ export type {
   AgentLoaderDiagnostic,
   AgentLoaderDiagnosticKind,
   AgentToolRule,
+  InvocationGuardVerdict,
   LoadAgentsOptions,
   LoadAgentsResult,
   ResolveAgentOptions,
   ResolvedAgentResult,
+  SkillInvocationState,
 } from "./agents"
 export {
   buildCompletionDetails,
@@ -247,8 +276,10 @@ export type {
   ResidencyRegistry,
   RespawnPort,
   RespawnResult,
+  SuspendFailure,
+  SuspendInput,
+  SuspendSummary,
   TaskLifecycle,
-  TeardownSummary,
 } from "./lifecycle"
 export { DEFAULT_SEND_DELIVERY, createSteeringEngine } from "./steering"
 export type {
@@ -270,6 +301,7 @@ export {
   buildSkillPrepend,
   buildTaskExecute,
   buildTaskToolDescription,
+  resolvePromptCacheSafeWaitSeconds,
   createFsSkillLoader,
   createTaskTool,
   excerptRendererPromptText,
@@ -284,9 +316,14 @@ export {
   taskCallLines,
   taskResultLines,
   validateTaskTarget,
+  waitForForegroundTask,
 } from "./tools/task"
 export type {
+  ForegroundWaitInput,
+  ForegroundWaitOptions,
+  ForegroundWaitResult,
   ResolveAncestry,
+  ScheduleDeadline,
   SkillLoader,
   SkillResolution,
   TaskAgentInfo,
@@ -303,6 +340,7 @@ export type {
 } from "./tools/task"
 export {
   TaskCancelParams,
+  MemberScopedTaskSendParams,
   TaskSendParams,
   clampWaitTimeout,
   createMemberScopedTaskSendTool,
@@ -321,9 +359,11 @@ export type {
   CancelResultDetails,
   CancelToolResult,
   MemberScopedTaskSendDeps,
+  MemberScopedTaskSendInput,
   SendManager,
   SendResultDetails,
   SendToolResult,
+  DefaultTeamRunIdResolution,
   SessionIdCarrier,
   TaskCancelDeps,
   TaskCancelInput,
@@ -350,6 +390,7 @@ export type {
   OutputManager,
   RenderOptions,
   RenderedTranscript,
+  SuspendedDetails,
   TaskOutputDeps,
   TaskOutputDetails,
   TaskOutputInput,
@@ -364,19 +405,22 @@ export {
   buildPeerMessageEnvelope,
   buildTeamMessage,
   createLeadPoller,
+  createIncrementalSessionMarkerIndex,
   DEFAULT_STALE_RESERVATION_TTL_MS,
   MEMBER_EXTENSION_BUNDLE_NAME,
   parseMemberExtensionEnv,
   reclaimStaleTeamReservations,
   reconcileTeamMailboxOnSessionStart,
   resolveMemberExtensionEntryPath,
+  createLeadDeliveryJournal,
   createTeamMemberRespawnLaunchResolver,
   TeamMemberRespawnLaunchError,
   sendTeamMessage,
-  WaitRegistry,
 } from "./team"
 export type {
   BuildTeamMessageOptions,
+  LeadDeliveryJournal,
+  LeadDeliveryJournalOptions,
   LeadInjection,
   LeadInjectionSink,
   LeadPollFilter,
@@ -387,12 +431,11 @@ export type {
   ParsedMemberExtensionEnv,
   ReclaimResult,
   ReconcileTeamMailboxDeps,
+  SessionMarkerExtractor,
+  SessionMarkerIndex,
+  SessionSliceReader,
   SendTeamMessageInput,
   SendTeamMessageResult,
-  WaitClaim,
-  WaitFilter,
-  WaitMessage,
-  WaitRegistration,
 } from "./team"
 export {
   approveShutdown,
@@ -427,6 +470,8 @@ export type {
 export {
   createTeam,
   deleteTeam,
+  isOwnedTeamMemberTask,
+  parseTeamMemberTaskIdentity,
   readMemberTaskMap,
   refreshTeamMemberStatuses,
   SenpiTeamRuntimeError,
@@ -435,6 +480,7 @@ export {
 export type {
   CreateTeamDeps,
   CreateTeamResult,
+  CreatedMemberInfo,
   DeleteTeamDeps,
   DeleteTeamResult,
   MemberStatusPort,
@@ -444,6 +490,8 @@ export type {
   SpawnMemberExtensionConfig,
   TeamCoreConfig,
   TeamMemberExtensionConfig,
+  TeamMemberOwnershipDeps,
+  TeamMemberTaskIdentity,
   TeamRuntimeManagerPort,
   TeamMemberRespawnLaunchResolverOptions,
   TeamMemberRespawnLaunchErrorCode,

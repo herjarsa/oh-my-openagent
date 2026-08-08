@@ -5,10 +5,10 @@ import { AGENT_FALLBACK_CHAINS } from "./fallback-chains"
 // Coupling guard: this test file must NEVER import @oh-my-opencode/model-core.
 // The chains are a hand transcription; the pins below catch transcription drift.
 
-const CURATED_AGENT_NAMES = ["explore", "librarian", "metis", "momus", "oracle"] as const
+const CURATED_AGENT_NAMES = ["explore", "librarian", "metis", "momus"] as const
 
 describe("AGENT_FALLBACK_CHAINS", () => {
-  test("#given the builtin chains #when listing keys #then exactly the 5 curated agent names are present", () => {
+  test("#given the builtin chains #when listing keys #then exactly the 4 curated agent names are present", () => {
     expect(Object.keys(AGENT_FALLBACK_CHAINS).sort()).toEqual([...CURATED_AGENT_NAMES])
   })
 
@@ -29,26 +29,18 @@ describe("AGENT_FALLBACK_CHAINS", () => {
       CURATED_AGENT_NAMES.map((name) => [name, AGENT_FALLBACK_CHAINS[name]?.length]),
     )
     expect(lengths).toEqual({
-      explore: 8,
-      librarian: 8,
+      explore: 9,
+      librarian: 9,
       metis: 5,
-      momus: 6,
-      oracle: 4,
-    })
-  })
-
-  test("#given the oracle chain #when reading the head entry #then it is the literal transcribed gpt-5.5 high rung", () => {
-    expect(AGENT_FALLBACK_CHAINS.oracle?.[0]).toEqual({
-      providers: ["openai", "github-copilot", "opencode", "vercel"],
-      model: "gpt-5.5",
-      variant: "high",
+      momus: 7,
     })
   })
 
   test("#given the mirrored fallback table #when compared with the independent transcription #then every provider model variant and order is pinned", () => {
     expect(AGENT_FALLBACK_CHAINS).toEqual({
       explore: [
-        { providers: ["openai"], model: "gpt-5.4-mini-fast" },
+        { providers: ["openai"], model: "gpt-5.6-luna-fast", variant: "low" },
+        { providers: ["deepseek"], model: "deepseek-v4-flash", variant: "max" },
         { providers: ["opencode-go", "bailian-coding-plan"], model: "qwen3.5-plus" },
         { providers: ["vercel"], model: "minimax-m2.7-highspeed" },
         { providers: ["opencode-go", "vercel"], model: "minimax-m3" },
@@ -58,7 +50,8 @@ describe("AGENT_FALLBACK_CHAINS", () => {
         { providers: ["openai", "vercel"], model: "gpt-5.4-nano" },
       ],
       librarian: [
-        { providers: ["openai"], model: "gpt-5.4-mini-fast" },
+        { providers: ["openai"], model: "gpt-5.6-luna-fast", variant: "low" },
+        { providers: ["deepseek"], model: "deepseek-v4-flash", variant: "max" },
         { providers: ["opencode-go", "bailian-coding-plan"], model: "qwen3.5-plus" },
         { providers: ["vercel"], model: "minimax-m2.7-highspeed" },
         { providers: ["opencode-go", "vercel"], model: "minimax-m3" },
@@ -69,23 +62,18 @@ describe("AGENT_FALLBACK_CHAINS", () => {
       ],
       metis: [
         { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-sonnet-4-6" },
-        { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-opus-4-7", variant: "max" },
-        { providers: ["openai", "github-copilot", "opencode", "vercel"], model: "gpt-5.5", variant: "high" },
+        { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-opus-5", variant: "max" },
+        { providers: ["openai", "github-copilot", "opencode", "vercel"], model: "gpt-5.6-sol", variant: "medium" },
         { providers: ["opencode-go", "vercel"], model: "glm-5.2" },
-        { providers: ["kimi-for-coding"], model: "k2p5" },
+        { providers: ["kimi-for-coding"], model: "kimi-k3" },
       ],
       momus: [
         { providers: ["openai", "vercel"], model: "gpt-5.6-terra", variant: "high" },
         { providers: ["github-copilot"], model: "gpt-5.6-terra", variant: "high" },
-        { providers: ["openai", "github-copilot", "opencode", "vercel"], model: "gpt-5.5", variant: "xhigh" },
-        { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-opus-4-7", variant: "max" },
+        { providers: ["openai", "opencode", "vercel"], model: "gpt-5.6-sol", variant: "xhigh" },
+        { providers: ["github-copilot"], model: "gpt-5.6-sol", variant: "high" },
+        { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-opus-5", variant: "max" },
         { providers: ["google", "github-copilot", "opencode", "vercel"], model: "gemini-3.1-pro", variant: "high" },
-        { providers: ["opencode-go", "vercel"], model: "glm-5.2" },
-      ],
-      oracle: [
-        { providers: ["openai", "github-copilot", "opencode", "vercel"], model: "gpt-5.5", variant: "high" },
-        { providers: ["google", "github-copilot", "opencode", "vercel"], model: "gemini-3.1-pro", variant: "high" },
-        { providers: ["anthropic", "github-copilot", "opencode", "vercel"], model: "claude-opus-4-7", variant: "max" },
         { providers: ["opencode-go", "vercel"], model: "glm-5.2" },
       ],
     })

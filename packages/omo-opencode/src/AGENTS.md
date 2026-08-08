@@ -1,6 +1,6 @@
 # src/ - Plugin Source
 
-**Generated:** 2026-07-17 / 7d664b96b
+**Generated:** 2026-08-07 / 51ab1e5b6
 
 ## STOP. THIS IS THE OPENCODE PLUGIN. QA IS MANDATORY. EVERY SINGLE TIME YOU CHANGE ANYTHING HERE.
 
@@ -54,8 +54,8 @@ serverPlugin(input, options)
 
 ```
 loadPluginConfig(directory, ctx)
-  1. User: ~/.config/opencode/oh-my-openagent.jsonc (legacy: oh-my-opencode.jsonc)
-  2. Walked configs: <pwd up to $HOME>/.opencode/oh-my-openagent.jsonc
+  1. User: ~/.omo/omo.jsonc
+  2. Walked configs: <pwd up to $HOME>/.omo/omo.jsonc
   3. mergeConfigs(user, walked)
      - agents/categories/claude_code: deepMerge (recursive, prototype-pollution safe)
      - disabled_*: Set union
@@ -63,7 +63,7 @@ loadPluginConfig(directory, ctx)
      - playwright_mcp_args: user-only (security)
      - others: override replaces
   4. Zod safeParse → defaults for omitted fields
-  5. migrateConfigFile() → idempotent via _migrations tracking + timestamped backups
+  5. Legacy configuration is migrated once at startup into the unified OMO chain
 ```
 
 ## HOOK COMPOSITION (5-tier)
@@ -118,9 +118,11 @@ Total: 53 base, 60 with team-mode. Each tier produces an object whose values are
 | `config/` | Zod v4 schema files | yes |
 | `plugin-handlers/` | 6-phase config loading pipeline | yes |
 | `openclaw/` | Bidirectional Discord/Telegram/HTTP integration | yes |
-| `__tests__/` | Plugin-level integration tests + perf fixtures | no |
+| `__tests__/` | Plugin-level integration tests + perf fixtures | yes |
 | `mcp/` | 5 built-in MCPs (3 remote + local stdio lsp + codegraph) | yes |
-| `testing/` | Test utilities + `create-plugin-module.ts` | no |
+| `testing/` | Test utilities + `create-plugin-module.ts` | yes |
+| `config-migration/` | Legacy config discovery + transform plans (consumed by senpi config-startup + codex startup) | yes |
+| `types/` | Ambient `.d.ts` declarations (markdown modules) | no |
 | `help/` | CLI help schema definitions (acp, doctor, sandbox, status) | no |
 | `locales/` | i18n strings (en, zh): toasts + model-fallback labels | no |
 

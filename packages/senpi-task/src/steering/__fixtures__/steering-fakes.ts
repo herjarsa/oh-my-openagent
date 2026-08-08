@@ -119,6 +119,7 @@ export function makeHarness(): SteeringHarness {
       return false
     },
     destruction,
+    runStatsSnapshot: () => undefined,
     now: () => clock,
   }
   return {
@@ -140,6 +141,7 @@ export function makeHarness(): SteeringHarness {
         depth: 1,
         execution_mode: "in-process",
         model: "anthropic/claude",
+        notify_on_terminal: false,
         ...overrides,
       })
       store.save(record)

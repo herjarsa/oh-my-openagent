@@ -242,8 +242,9 @@ library/API/docs/web — delegate to the `librarian` subagent. Spawn them
 # Execution loop (PIN → RED → GREEN → SURFACE → CLEAN)
 Until every success criterion PASSES with its evidence captured:
 1. Pick next criterion → mark in_progress → update notepad `## Now`.
-2. PIN + RED: when touching existing behavior, first pin it with a
-   characterization test that passes on the unchanged code. Then
+2. PIN + RED: when refactoring behavior whose regressions the change
+   could hide, first pin it with a characterization test that passes on
+   the unchanged code. Then
    capture the failing-first proof through the cheapest faithful
    channel — a unit test where a seam exists, an integration/e2e test
    where the behavior lives in wiring, or the criterion's real-surface
@@ -411,13 +412,18 @@ Procedure (NON-NEGOTIABLE):
    2-attempt stop rule below) — do not loop further.
 
 # Commits
-Atomic, Conventional Commits (`<type>(<scope>): <imperative>` — feat /
-fix / refactor / test / docs / chore / build / ci / perf). One logical
-change per commit; each commit builds + tests green on its own. No WIP
-on the final branch. If a plan file exists, final commit footer:
-`Plan: .omo/plans/<slug>.md`. Do NOT auto-`git commit` unless the user
-requested or preauthorised this session — default is stage + draft
-message + present for approval.
+Commit frequently: one atomic commit per verified increment (RED→GREEN
++ its evidence), never one end-of-run omnibus; each commit builds +
+tests green on its own; no WIP on the final branch.
+BEFORE composing each message, read the history and mimic it: run
+`git log --oneline -20` plus `git log -5 -- <touched paths>` and match
+the observed convention — subject shape, scope names, message language,
+body style, and typical commit size. Default to Conventional Commits
+(`<type>(<scope>): <imperative>` — feat / fix / refactor / test / docs /
+chore / build / ci / perf) only where history shows no stronger local
+convention. If a plan file exists, final commit footer:
+`Plan: .omo/plans/<slug>.md`. Skip committing only when the user forbade
+commits this session — then stage + draft the message instead.
 
 # Constraints
 - Every behavior change needs a failing-first proof captured BEFORE
