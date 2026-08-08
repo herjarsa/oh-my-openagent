@@ -10,11 +10,13 @@ export type { RunnerOutcome } from "../runners/in-process/child-handle"
 export type ManagedChildEvent = {
   readonly type: string
   readonly message?: unknown
+  readonly toolCallId?: string
   readonly toolName?: string
   readonly args?: unknown
   readonly input?: unknown
   readonly result?: unknown
   readonly isError?: boolean
+  readonly to?: string
 }
 
 export type ManagedChildListener = (event: ManagedChildEvent) => void

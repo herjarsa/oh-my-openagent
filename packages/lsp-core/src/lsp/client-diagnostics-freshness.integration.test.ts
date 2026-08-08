@@ -300,7 +300,7 @@ describe("LspClient diagnostics freshness", () => {
 					{ error: { code: -32601, message: "Method not found" } },
 				],
 			},
-			{ diagnosticsFreshnessTimeoutMs: 60, versionlessPublishQuiescenceMs: 5 },
+			{ diagnosticsFreshnessTimeoutMs: 500, versionlessPublishQuiescenceMs: 5 },
 		);
 
 		const first = await context.client.diagnostics(context.source);
@@ -323,7 +323,7 @@ describe("LspClient diagnostics freshness", () => {
 					{ error: { code: -32601, message: "Method not found" } },
 				],
 			},
-			{ diagnosticsFreshnessTimeoutMs: 60, versionlessPublishQuiescenceMs: 5 },
+			{ diagnosticsFreshnessTimeoutMs: 500, versionlessPublishQuiescenceMs: 5 },
 		);
 
 		const first = await context.client.diagnostics(context.source);

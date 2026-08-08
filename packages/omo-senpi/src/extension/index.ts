@@ -3,13 +3,14 @@ import type { OmoSenpiComponent } from "./types"
 import { createConfigStartupComponent } from "../components/config-startup"
 import { createCommentCheckerComponent } from "../components/comment-checker"
 import { createConfigWatchComponent } from "../components/config-watch"
+import { createAstGrepComponent } from "../components/ast-grep"
 import { createLspComponent } from "../components/lsp"
-import { createCodegraphComponent } from "../components/codegraph"
 import { createSenpiTelemetryComponent } from "../components/telemetry"
 import { createTaskComponent } from "../components/task"
 import { createStartWorkContinuationComponent } from "../components/start-work-continuation"
 import { createUltraworkComponent } from "../components/ultrawork"
 import { createUlwLoopComponent } from "../components/ulw-loop"
+import { createTodoFanoutReminderComponent } from "../components/todo-fanout-reminder"
 import { createFallbackArchitectComponent } from "../components/fallback-architect"
 
 const components: OmoSenpiComponent[] = [
@@ -17,11 +18,12 @@ const components: OmoSenpiComponent[] = [
   createUltraworkComponent(),
   createStartWorkContinuationComponent(),
   createUlwLoopComponent(),
+  createTodoFanoutReminderComponent(),
   createFallbackArchitectComponent(),
   createCommentCheckerComponent(),
   createSenpiTelemetryComponent(),
+  createAstGrepComponent(),
   createLspComponent(),
-  createCodegraphComponent(),
   createTaskComponent(),
   createConfigWatchComponent(),
 ]

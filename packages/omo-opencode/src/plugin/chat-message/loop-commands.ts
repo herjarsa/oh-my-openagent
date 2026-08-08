@@ -1,6 +1,7 @@
 import type { OhMyOpenCodeConfig } from "../../config"
 
 import { detectSlashCommand, removeCodeBlocks } from "../../hooks/auto-slash-command/detector"
+import { AUTO_SLASH_COMMAND_TAG_OPEN } from "../../hooks/auto-slash-command/constants"
 import { parseGoalCommand } from "../../hooks/goal/command-arguments"
 import { checkObjective } from "../../hooks/goal/validation"
 import { log } from "../../shared"
@@ -17,6 +18,12 @@ export function handleGoalMessage(args: {
 }): void {
   const { hooks, input, output, isFirstMessage, pluginConfig, nativeGoalCommand, rawPromptText } = args
   if (!hooks.goal || nativeGoalCommand) {
+    return
+  }
+
+  // Never treat an auto-slash-expanded payload (e.g. a skill body injected by the
+  // auto-slash command hook) as a goal objective. (#6591)
+  if (rawPromptText.includes(AUTO_SLASH_COMMAND_TAG_OPEN)) {
     return
   }
 

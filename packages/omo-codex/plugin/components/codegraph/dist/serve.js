@@ -3477,6 +3477,9 @@ function handlePipeResult(left, next, ctx) {
   }
   return next._zod.run({ value: left.value, issues: left.issues, fallback: left.fallback }, ctx);
 }
+var $ZodPreprocess = /* @__PURE__ */ $constructor("$ZodPreprocess", (inst, def) => {
+  $ZodPipe.init(inst, def);
+});
 var $ZodReadonly = /* @__PURE__ */ $constructor("$ZodReadonly", (inst, def) => {
   $ZodType.init(inst, def);
   defineLazy(inst._zod, "propValues", () => def.innerType._zod.propValues);
@@ -5563,6 +5566,10 @@ function pipe(in_, out) {
     out
   });
 }
+var ZodPreprocess = /* @__PURE__ */ $constructor("ZodPreprocess", (inst, def) => {
+  ZodPipe.init(inst, def);
+  $ZodPreprocess.init(inst, def);
+});
 var ZodReadonly = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def) => {
   $ZodReadonly.init(inst, def);
   ZodType.init(inst, def);
@@ -5586,22 +5593,142 @@ function refine(fn, _params = {}) {
 function superRefine(fn, params) {
   return _superRefine(fn, params);
 }
+function preprocess(fn, schema) {
+  return new ZodPreprocess({
+    type: "pipe",
+    in: transform(fn),
+    out: schema
+  });
+}
+
+// ../../../../omo-config-core/src/schema/reasoning-vocabulary.ts
+var REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+var REASONING_AUTO = "auto";
+var REASONING_LEVEL_SET = new Set(REASONING_LEVELS);
+var REASONING_LEVEL_OR_AUTO_SET = new Set([...REASONING_LEVELS, REASONING_AUTO]);
+function isReasoningLevel(value) {
+  return REASONING_LEVEL_SET.has(value);
+}
+function normalizeReasoning(input) {
+  const normalized = input.trim().toLowerCase();
+  if (!normalized)
+    return {};
+  if (normalized === "none")
+    return { level: "off" };
+  if (normalized === REASONING_AUTO)
+    return { level: REASONING_AUTO };
+  if (isReasoningLevel(normalized))
+    return { level: normalized };
+  return { passthrough: normalized };
+}
+function splitReasoningSuffix(model, options) {
+  if (typeof model !== "string")
+    return { base: "" };
+  const trimmed = model.trim();
+  if (!trimmed)
+    return { base: "" };
+  const separatorIndex = trimmed.lastIndexOf(":");
+  if (separatorIndex === -1)
+    return { base: trimmed };
+  const base = trimmed.slice(0, separatorIndex).trim();
+  const token = trimmed.slice(separatorIndex + 1).trim().toLowerCase();
+  if (!base || !REASONING_LEVEL_OR_AUTO_SET.has(token))
+    return { base: trimmed };
+  if (token === "max" && !(options?.allowMaxSuffix ?? base.includes("/")))
+    return { base: trimmed };
+  return { base, level: token };
+}
+
+// ../../../../omo-config-core/src/schema/model-ref.ts
+var REASONING_LEVELS_OR_AUTO = [...REASONING_LEVELS, "auto"];
+var OmoReasoningSchema = union([
+  _enum(REASONING_LEVELS_OR_AUTO),
+  string2()
+]);
+var OmoModelRefObjectSchema = object({
+  model: string2(),
+  reasoning: OmoReasoningSchema.optional(),
+  temperature: number2().min(0).max(2).optional(),
+  top_p: number2().min(0).max(1).optional(),
+  max_tokens: number2().int().positive().optional(),
+  provider_options: record(string2(), unknown()).optional()
+}).strict();
+var OmoModelRefSchema = union([string2(), OmoModelRefObjectSchema]);
 
 // ../../../../omo-config-core/src/schema/fallback-models.ts
 var OmoThinkingConfigSchema = object({
   type: _enum(["enabled", "disabled"]),
   budgetTokens: number2().optional()
 }).strict();
-var OmoReasoningEffortSchema = _enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
-var OmoFallbackModelObjectSchema = object({
+var OmoReasoningEffortSchema = OmoReasoningSchema;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function canonicalReasoning(value) {
+  if (typeof value !== "string")
+    return;
+  const normalized = normalizeReasoning(value);
+  return normalized.level ?? normalized.passthrough;
+}
+function canonicalModelString(model) {
+  const colon = splitReasoningSuffix(model, { allowMaxSuffix: true });
+  if (colon.level !== undefined)
+    return `${colon.base}:${colon.level}`;
+  const trimmed = model.trim();
+  const parenthesized = trimmed.match(/^(.*)\(([^()]+)\)\s*$/);
+  const spaced = parenthesized === null ? trimmed.match(/^(.*\S)\s+([a-z][a-z0-9_-]*)$/i) : null;
+  const base = (parenthesized?.[1] ?? spaced?.[1])?.trim();
+  const token = (parenthesized?.[2] ?? spaced?.[2])?.trim();
+  if (base === undefined || token === undefined)
+    return trimmed;
+  const normalized = normalizeReasoning(token);
+  return normalized.level === undefined ? trimmed : `${base}:${normalized.level}`;
+}
+function normalizeLegacyModelFields(entry) {
+  const normalized = { ...entry };
+  delete normalized["variant"];
+  delete normalized["reasoningEffort"];
+  delete normalized["thinking"];
+  delete normalized["textVerbosity"];
+  delete normalized["maxTokens"];
+  delete normalized["providerOptions"];
+  if (typeof entry["model"] === "string")
+    normalized["model"] = canonicalModelString(entry["model"]);
+  const explicitReasoning = canonicalReasoning(entry["reasoning"]);
+  const variant = canonicalReasoning(entry["variant"]);
+  const reasoningEffort = canonicalReasoning(entry["reasoningEffort"]);
+  const thinking = isRecord(entry["thinking"]) ? entry["thinking"] : undefined;
+  const reasoning = explicitReasoning ?? reasoningEffort ?? variant ?? (thinking?.["type"] === "disabled" ? "off" : undefined);
+  if (reasoning !== undefined)
+    normalized["reasoning"] = reasoning;
+  const providerOptions = isRecord(entry["provider_options"]) ? { ...entry["provider_options"] } : isRecord(entry["providerOptions"]) ? { ...entry["providerOptions"] } : {};
+  if (thinking?.["type"] === "enabled")
+    providerOptions["thinking"] = { ...thinking };
+  if (entry["textVerbosity"] !== undefined)
+    providerOptions["textVerbosity"] = entry["textVerbosity"];
+  if (Object.keys(providerOptions).length > 0)
+    normalized["provider_options"] = providerOptions;
+  if (entry["max_tokens"] !== undefined)
+    normalized["max_tokens"] = entry["max_tokens"];
+  else if (entry["maxTokens"] !== undefined)
+    normalized["max_tokens"] = entry["maxTokens"];
+  return normalized;
+}
+var OmoLegacyFallbackModelObjectInputSchema = object({
   model: string2(),
-  variant: string2().optional(),
-  reasoningEffort: OmoReasoningEffortSchema.optional(),
+  reasoning: OmoReasoningSchema.optional(),
   temperature: number2().min(0).max(2).optional(),
   top_p: number2().min(0).max(1).optional(),
+  max_tokens: number2().int().positive().optional(),
+  provider_options: record(string2(), unknown()).optional(),
+  variant: string2().optional(),
+  reasoningEffort: OmoReasoningEffortSchema.optional(),
+  thinking: OmoThinkingConfigSchema.optional(),
+  textVerbosity: _enum(["low", "medium", "high"]).optional(),
   maxTokens: number2().optional(),
-  thinking: OmoThinkingConfigSchema.optional()
+  providerOptions: record(string2(), unknown()).optional()
 }).strict();
+var OmoFallbackModelObjectSchema = preprocess((value) => isRecord(value) ? normalizeLegacyModelFields(value) : value, OmoLegacyFallbackModelObjectInputSchema);
 var OmoFallbackModelsSchema = union([
   string2(),
   array(string2()),
@@ -5610,19 +5737,16 @@ var OmoFallbackModelsSchema = union([
 ]);
 
 // ../../../../omo-config-core/src/schema/agent.ts
-var OmoAgentModelEntrySchema = union([
-  string2(),
-  object({
-    model: string2(),
-    variant: string2().optional(),
-    reasoningEffort: OmoReasoningEffortSchema.optional()
-  }).strict()
-]);
-var OmoAgentDefSchema = object({
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var OmoAgentModelEntrySchema = union([string2(), OmoFallbackModelObjectSchema]);
+var OmoAgentDefInputSchema = object({
   description: string2().optional(),
   prompt: string2().optional(),
   model: string2().optional(),
   models: array(OmoAgentModelEntrySchema).optional(),
+  reasoning: OmoReasoningSchema.optional(),
   variant: string2().optional(),
   reasoningEffort: OmoReasoningEffortSchema.optional(),
   tools: record(string2(), boolean2()).optional(),
@@ -5635,16 +5759,24 @@ var OmoAgentDefSchema = object({
   temperature: number2().min(0).max(2).optional(),
   disable: boolean2().optional()
 }).strict();
+var OmoAgentDefSchema = preprocess((value) => isRecord2(value) ? normalizeLegacyModelFields(value) : value, OmoAgentDefInputSchema);
 var OmoAgentsConfigSchema = record(string2(), OmoAgentDefSchema);
 
 // ../../../../omo-config-core/src/schema/category.ts
-var OmoCategoryConfigSchema = object({
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var OmoCategoryConfigObjectSchema = object({
   description: string2().optional(),
   model: string2().optional(),
-  fallback_models: OmoFallbackModelsSchema.optional(),
-  variant: string2().optional(),
+  models: array(union([string2(), OmoFallbackModelObjectSchema])).optional(),
+  reasoning: OmoReasoningSchema.optional(),
   temperature: number2().min(0).max(2).optional(),
   top_p: number2().min(0).max(1).optional(),
+  max_tokens: number2().int().positive().optional(),
+  provider_options: record(string2(), unknown()).optional(),
+  fallback_models: OmoFallbackModelsSchema.optional(),
+  variant: string2().optional(),
   maxTokens: number2().optional(),
   thinking: OmoThinkingConfigSchema.optional(),
   reasoningEffort: OmoReasoningEffortSchema.optional(),
@@ -5653,8 +5785,10 @@ var OmoCategoryConfigSchema = object({
   prompt_append: string2().optional(),
   max_prompt_tokens: number2().int().positive().optional(),
   is_unstable_agent: boolean2().optional(),
-  disable: boolean2().optional()
+  disable: boolean2().optional(),
+  warn_unavailable: boolean2().optional()
 }).strict();
+var OmoCategoryConfigSchema = preprocess((value) => isRecord3(value) ? normalizeLegacyModelFields(value) : value, OmoCategoryConfigObjectSchema);
 var OmoCategoriesConfigSchema = record(string2(), OmoCategoryConfigSchema);
 
 // ../../../../omo-config-core/src/schema/harness.ts
@@ -5682,13 +5816,19 @@ var OmoCodegraphSettingsSchema = OmoCodegraphSettingsLayerSchema.extend({
 }).strict();
 
 // ../../../../omo-config-core/src/schema/model-catalog.ts
-var OmoModelCatalogEntrySchema = object({
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var OmoModelCatalogEntryInputSchema = object({
   model: string2(),
+  reasoning: OmoReasoningSchema.optional(),
   variant: string2().optional(),
   reasoningEffort: OmoReasoningEffortSchema.optional()
 }).strict();
+var OmoModelCatalogEntrySchema = preprocess((value) => isRecord4(value) ? normalizeLegacyModelFields(value) : value, OmoModelCatalogEntryInputSchema);
 var OmoModelCatalogSchema = record(string2(), OmoModelCatalogEntrySchema);
-var OmoModelCatalogEntryLayerSchema = OmoModelCatalogEntrySchema.partial();
+var OmoModelCatalogEntryLayerInputSchema = OmoModelCatalogEntryInputSchema.partial();
+var OmoModelCatalogEntryLayerSchema = preprocess((value) => isRecord4(value) ? normalizeLegacyModelFields(value) : value, OmoModelCatalogEntryLayerInputSchema);
 var OmoModelCatalogLayerSchema = record(string2(), OmoModelCatalogEntryLayerSchema);
 
 // ../../../../omo-config-core/src/schema/task.ts
@@ -5702,6 +5842,9 @@ var OmoTaskTeamSettingsSchema = object({
   max_parallel_members: number2().int().min(1).max(8).default(4),
   max_wall_clock_minutes: number2().int().positive().default(120)
 }).strict();
+var OmoTaskWarningsSchema = object({
+  unavailable_categories: boolean2().default(true)
+}).strict();
 var OmoTaskSettingsSchema = object({
   default_execution_mode: _enum(["in-process", "process"]).default("in-process"),
   default_concurrency: number2().int().positive().default(5),
@@ -5712,6 +5855,7 @@ var OmoTaskSettingsSchema = object({
   ttl_ms: number2().int().positive().default(86400000),
   state_dir: string2().optional(),
   reattach_on_reconcile: boolean2().optional(),
+  warnings: OmoTaskWarningsSchema.default({ unavailable_categories: true }),
   wait: OmoTaskWaitSchema.default({ min_ms: 5000, default_ms: 60000, max_ms: 600000 }),
   team: OmoTaskTeamSettingsSchema.default({
     max_members: 8,
@@ -5729,6 +5873,9 @@ var OmoTaskTeamSettingsLayerSchema = object({
   max_parallel_members: number2().int().min(1).max(8).optional(),
   max_wall_clock_minutes: number2().int().positive().optional()
 }).strict();
+var OmoTaskWarningsLayerSchema = object({
+  unavailable_categories: boolean2().optional()
+}).strict();
 var OmoTaskSettingsLayerSchema = object({
   default_execution_mode: _enum(["in-process", "process"]).optional(),
   default_concurrency: number2().int().positive().optional(),
@@ -5739,6 +5886,7 @@ var OmoTaskSettingsLayerSchema = object({
   ttl_ms: number2().int().positive().optional(),
   state_dir: string2().optional(),
   reattach_on_reconcile: boolean2().optional(),
+  warnings: OmoTaskWarningsLayerSchema.optional(),
   wait: OmoTaskWaitLayerSchema.optional(),
   team: OmoTaskTeamSettingsLayerSchema.optional()
 }).strict();
@@ -7239,7 +7387,8 @@ function mergeOmoConfigRecords(base, override, parentKey) {
 }
 
 // ../../../../omo-config-core/src/loader/paths.ts
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join7, posix, relative, resolve as resolve3 } from "node:path";
+import { userInfo } from "node:os";
+import { dirname as dirname2, join as join7, posix, resolve as resolve3 } from "node:path";
 
 // ../../../../omo-config-core/src/internal/posix-path.ts
 function toPosixPath(path) {
@@ -7257,10 +7406,7 @@ var DEFAULT_READ_FILE_SYSTEM = {
 
 // ../../../../omo-config-core/src/loader/paths.ts
 var MAX_PROJECT_CONFIG_DIRECTORY_DEPTH = 256;
-function containsPath(parent, child) {
-  const pathToChild = relative(parent, child);
-  return pathToChild === "" || !pathToChild.startsWith("..") && !isAbsolute2(pathToChild);
-}
+var ACCOUNT_HOME_DIR = userInfo().homedir;
 function resolveHomeDir(env = process.env) {
   const homeDir = env.HOME ?? env.USERPROFILE ?? process.cwd();
   return homeDir.startsWith("/") ? posix.resolve(homeDir) : toPosixPath(resolve3(homeDir));
@@ -7312,15 +7458,14 @@ function realpathOrSelf(path, fileSystem) {
     return path;
   }
 }
-function findProjectConfigPathsFarthestFirst(cwd, homeDir, fileSystem) {
+function findProjectConfigPathsFarthestFirst(cwd, homeDir, fileSystem, accountHomeDir = homeDir) {
   const startDir = resolve3(cwd);
-  const resolvedHomeDir = resolve3(homeDir);
-  const realHomeDir = realpathOrSelf(resolvedHomeDir, fileSystem);
-  const stopDir = containsPath(realHomeDir, realpathOrSelf(startDir, fileSystem)) ? realHomeDir : null;
+  const boundaryDirs = [...new Set([resolve3(homeDir), resolve3(accountHomeDir)])];
+  const realBoundaryDirs = new Set(boundaryDirs.map((path) => realpathOrSelf(path, fileSystem)));
   const nearestFirst = [];
   let currentDir = startDir;
   for (let depth = 0;depth < MAX_PROJECT_CONFIG_DIRECTORY_DEPTH; depth += 1) {
-    const isHomeDir = currentDir === resolvedHomeDir || stopDir !== null && realpathOrSelf(currentDir, fileSystem) === stopDir;
+    const isHomeDir = boundaryDirs.includes(currentDir) || realBoundaryDirs.has(realpathOrSelf(currentDir, fileSystem));
     const configPath = isHomeDir ? null : detectOmoJsonPath(currentDir, fileSystem);
     if (configPath !== null)
       nearestFirst.push(configPath);
@@ -7337,7 +7482,7 @@ function resolveOmoConfigPaths(options) {
   const fileSystem = options.fileSystem ?? DEFAULT_READ_FILE_SYSTEM;
   const env = options.env ?? process.env;
   const userPath = detectUserOmoJsonPath(env, fileSystem);
-  const projectPaths = findProjectConfigPathsFarthestFirst(options.cwd, resolveHomeDir(env), fileSystem);
+  const projectPaths = findProjectConfigPathsFarthestFirst(options.cwd, resolveHomeDir(env), fileSystem, ACCOUNT_HOME_DIR);
   return [
     { path: userPath, scope: "user" },
     ...projectPaths.map((path) => ({ path, scope: "project" }))
@@ -7972,6 +8117,23 @@ function prepareTargetWrite(input) {
   const edits = [...collectMigrationEdits(merged.additions), { path: ["_migrations"], value: marker }];
   return { diagnostics: merged.diagnostics, document, edits };
 }
+function prepareTargetReplacement(input) {
+  const marker = markerValue(input.target, input.migrationId, input.targetPath);
+  const document = { ...input.document, _migrations: marker };
+  validateTarget(input.targetPath, document);
+  const edits = [];
+  for (const key of Object.keys(input.target)) {
+    if (key !== "_migrations" && !Object.prototype.hasOwnProperty.call(input.document, key)) {
+      edits.push({ path: [key], value: undefined });
+    }
+  }
+  for (const [key, value] of Object.entries(input.document)) {
+    if (key !== "_migrations")
+      edits.push({ path: [key], value });
+  }
+  edits.push({ path: ["_migrations"], value: marker });
+  return { diagnostics: [], document, edits };
+}
 function writePreparedTarget(input) {
   input.writeTarget({
     edits: input.prepared.edits,
@@ -8004,8 +8166,16 @@ function parseJournal(value) {
   if (!isPlainObject3(value["targetWrite"]) || !isPlainObject3(value["targetWrite"]["additions"])) {
     throw new Error("Migration journal target write is invalid");
   }
+  const targetWriteMode = value["targetWrite"]["mode"];
+  if (targetWriteMode !== undefined && targetWriteMode !== "replace-target") {
+    throw new Error("Migration journal target write mode is invalid");
+  }
   if (typeof value["targetWritten"] !== "boolean" || !Array.isArray(value["completedMoves"])) {
     throw new Error("Migration journal completion state is invalid");
+  }
+  const diagnostics = value["diagnostics"];
+  if (diagnostics !== undefined && (!Array.isArray(diagnostics) || !diagnostics.every((entry) => typeof entry === "string"))) {
+    throw new Error("Migration journal diagnostics are invalid");
   }
   if (!value["completedMoves"].every((path) => typeof path === "string")) {
     throw new Error("Migration journal completed moves are invalid");
@@ -8022,9 +8192,13 @@ function parseJournal(value) {
   return {
     backupMoves,
     completedMoves: [...value["completedMoves"]],
+    diagnostics: diagnostics === undefined ? [] : [...diagnostics],
     migrationId: value["migrationId"],
     targetPath: value["targetPath"],
-    targetWrite: { additions: { ...value["targetWrite"]["additions"] } },
+    targetWrite: {
+      additions: { ...value["targetWrite"]["additions"] },
+      ...targetWriteMode === undefined ? {} : { mode: targetWriteMode }
+    },
     targetWritten: value["targetWritten"],
     version: 1
   };
@@ -8215,7 +8389,12 @@ function resumeMigrationJournal(input) {
   input.renewLock();
   const target = targetDocument(journal.targetPath, input.fileSystem);
   if (!hasMigrationMarker(target, journal.migrationId)) {
-    const prepared = prepareTargetWrite({
+    const prepared = journal.targetWrite.mode === "replace-target" ? prepareTargetReplacement({
+      document: journal.targetWrite.additions,
+      migrationId: journal.migrationId,
+      target,
+      targetPath: journal.targetPath
+    }) : prepareTargetWrite({
       additions: journal.targetWrite.additions,
       migrationId: journal.migrationId,
       target,
@@ -8319,11 +8498,17 @@ function executePlan(input) {
   assertSafeSourcePaths(plan.sources, protectedPaths);
   const existingSources = plan.sources.filter((source) => fileSystem.existsSync(source.path));
   const target = targetDocument(plan.targetPath, fileSystem);
-  if (!shouldRunMigration({ legacySourcesExist: existingSources.length > 0, migrationId: plan.id, target })) {
+  const replaceTarget = plan.mode === "replace-target";
+  if (!shouldRunMigration({
+    legacySourcesExist: replaceTarget ? fileSystem.existsSync(plan.targetPath) : existingSources.length > 0,
+    migrationId: plan.id,
+    target
+  })) {
     return { diagnostics: [], journalResumed, status: "skipped" };
   }
-  const transformed = transformResult(plan.transform(loadSources(existingSources, fileSystem)));
-  const prepared = prepareTargetWrite({ additions: transformed.document, migrationId: plan.id, target, targetPath: plan.targetPath });
+  const loaded = replaceTarget ? [{ path: plan.targetPath, value: target }] : loadSources(existingSources, fileSystem);
+  const transformed = transformResult(plan.transform(loaded));
+  const prepared = replaceTarget ? prepareTargetReplacement({ document: transformed.document, migrationId: plan.id, target, targetPath: plan.targetPath }) : prepareTargetWrite({ additions: transformed.document, migrationId: plan.id, target, targetPath: plan.targetPath });
   const diagnostics = [...transformed.diagnostics, ...prepared.diagnostics];
   const moves = backupMoves(existingSources, plan.id, fileSystem, protectedPaths);
   const preview = { backupMoves: moves, targetPath: plan.targetPath, transform: transformed.document };
@@ -8333,9 +8518,13 @@ function executePlan(input) {
   const journal = {
     backupMoves: moves,
     completedMoves: [],
+    diagnostics,
     migrationId: plan.id,
     targetPath: plan.targetPath,
-    targetWrite: { additions: transformed.document },
+    targetWrite: {
+      additions: transformed.document,
+      ...replaceTarget ? { mode: "replace-target" } : {}
+    },
     targetWritten: false,
     version: 1
   };
@@ -8399,17 +8588,17 @@ import { existsSync as existsSync6 } from "node:fs";
 import { posix as posix4, win32 } from "node:path";
 var MIGRATION_ID = "2026-07-codex-config-jsonc";
 var OMO_SCHEMA_URL = "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json";
-function isRecord(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function recordAt(value, key) {
   const candidate = value[key];
-  return isRecord(candidate) ? candidate : undefined;
+  return isRecord5(candidate) ? candidate : undefined;
 }
 function migrationHistory(sources, configPath) {
   const history = [];
   for (const source of sources) {
-    if (!isRecord(source.value))
+    if (!isRecord5(source.value))
       continue;
     for (const key of ["_migrations", "appliedMigrations"]) {
       const values = source.value[key];
@@ -8425,7 +8614,7 @@ function migrationHistory(sources, configPath) {
 }
 function transformConfigJsonc(configPath, sources) {
   const config2 = sources.find((source) => source.path === configPath);
-  const legacy = config2 === undefined || !isRecord(config2.value) ? {} : config2.value;
+  const legacy = config2 === undefined || !isRecord5(config2.value) ? {} : config2.value;
   const omo = recordAt(legacy, "[omo]");
   const senpi = recordAt(legacy, "[senpi]");
   const history = migrationHistory(sources, configPath);

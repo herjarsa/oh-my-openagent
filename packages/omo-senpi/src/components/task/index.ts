@@ -17,15 +17,18 @@ import {
 } from "@oh-my-opencode/senpi-task"
 
 import type { ComponentContext, OmoSenpiComponent, SenpiExtensionAPI } from "../../extension/types"
+import { CATEGORY_UNAVAILABLE_MESSAGE_TYPE } from "./category-unavailable-warning"
 import { registerTaskCommands } from "./commands"
 import { composeTaskEngine, type TaskEngine } from "./engine"
 import { TASK_USAGE_HINT_FLAG, wireEventBridge } from "./event-bridge"
 import { createLeadPollerLifecycle, type LeadPollerLifecycle } from "./lead-poller-lifecycle"
 import { TEAM_MEMBER_LIVENESS_MESSAGE_TYPE } from "./member-liveness"
 import { TASK_COMPLETION_MESSAGE_TYPE } from "./parent-notifier"
-import { renderTaskCompletion, renderTeamMemberLiveness } from "./renderers"
+import { renderCategoryUnavailable, renderTaskCompletion, renderTeamMemberLiveness } from "./renderers"
+import { createResumptionChannelEmitter } from "./resumption-channel-emitter"
 import { createTeamMailboxReconciler, createTeamService } from "./team-service"
 import { createSessionTransitionBridge } from "./session-transition-bridge"
+import { createSkillInvocationTracker, type SkillInvocationTracker } from "./skill-invocation-tracker"
 import { wireSessionStartProcessSweep } from "./process-sweep"
 import { createTaskStatusUi } from "./status-ui"
 import { missingTaskCapabilities } from "./surface"
@@ -76,19 +79,43 @@ export function createTaskComponent(options: TaskComponentOptions = {}): OmoSenp
 
       pi.registerMessageRenderer?.(TASK_COMPLETION_MESSAGE_TYPE, renderTaskCompletion)
       pi.registerMessageRenderer?.(TEAM_MEMBER_LIVENESS_MESSAGE_TYPE, renderTeamMemberLiveness)
+      pi.registerMessageRenderer?.(CATEGORY_UNAVAILABLE_MESSAGE_TYPE, renderCategoryUnavailable)
       const teamTools = createTeamToolContext(pi, ctx, engine)
-      registerTaskTools(pi, engine, teamTools.service, teamTools.leadPollers.resolveDefaultTeamRunId)
+      const skillInvocations = createSkillInvocationTracker(pi)
+      registerTaskTools(pi, engine, teamTools.service, teamTools.leadPollers.resolveDefaultTeamRunId, skillInvocations)
       registerTeamTools(pi, teamTools)
       registerRemovedTeamWaitHint(pi)
       registerTaskCommands(pi, engine.manager)
 
-      const statusUi = createTaskStatusUi({ manager: engine.manager, runtime: engine.runtime })
-      engine.onStoreMutation(() => statusUi.scheduleSync())
+      const statusUi = createTaskStatusUi({
+        manager: engine.manager,
+        runtime: engine.runtime,
+        terminalWidth: () => process.stdout.columns,
+      })
+      const resumptionChannels = createResumptionChannelEmitter({
+        pi,
+        manager: engine.manager,
+        sessionId: () => engine.runtime.sessionId(),
+        stateDir: {
+          project_dir: cwd,
+          ...(engine.settings.state_dir !== undefined ? { task: { state_dir: engine.settings.state_dir } } : {}),
+        },
+        settings: engine.settings,
+      })
+      engine.onStoreMutation(() => {
+        statusUi.scheduleSync()
+        void resumptionChannels.emitIfChanged().catch((error: unknown) => {
+          ctx.logger.warn("omo-senpi task resumption-channel emission failed", {
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+      })
       const transitions = createSessionTransitionBridge({ runtime: engine.runtime, notifier: engine.notifier })
 
       wireEventBridge(pi, ctx, engine, statusUi, transitions, {
         reconcileTeamMailbox: teamTools.reconcileTeamMailbox,
         leadPollers: teamTools.leadPollers,
+        resumptionChannels,
       })
     },
   }
@@ -122,6 +149,7 @@ function registerTaskTools(
   engine: TaskEngine,
   teamService: TeamToolsService,
   resolveDefaultTeamRunId: TaskSendTeamRouting["resolveDefaultTeamRunId"],
+  skillInvocations: SkillInvocationTracker,
 ): void {
   const resolveCallerSessionId = defaultResolveCallerSessionId
   const manager = engine.manager
@@ -130,6 +158,7 @@ function registerTaskTools(
       manager,
       omoConfig: engine.omoConfig,
       agents: engine.agents,
+      resolveSkillInvocations: (sessionId: string) => skillInvocations.stateFor(sessionId),
     }),
   })
   pi.registerTool({
@@ -150,6 +179,7 @@ function createTeamToolContext(
 ): TeamToolContext {
   const serviceDeps = {
     manager: engine.manager,
+    destruction: engine.lifecycle,
     runtime: engine.runtime,
     settings: engine.settings,
     omoConfig: engine.omoConfig,
