@@ -12,6 +12,17 @@ function spikeLog(event: string, data: Record<string, unknown> = {}): void {
   }
 }
 
+const degradedCounts = new Map<string, number>()
+
+function degradedLog(method: string): void {
+  const count = (degradedCounts.get(method) ?? 0) + 1
+  degradedCounts.set(method, count)
+  // Hot paths (status polling) would flood the log — first + every 50th.
+  if (count === 1 || count % 50 === 0) {
+    spikeLog("v1_client_degraded", { method, count })
+  }
+}
+
 type V2Session = {
   get?: (input: unknown) => Promise<unknown>
   context?: (input: unknown) => Promise<unknown>
@@ -128,7 +139,7 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
 
   const degradedList = (name: string) => {
     return async () => {
-      spikeLog("v1_client_degraded", { method: name })
+      degradedLog(name)
       return { data: [] }
     }
   }
@@ -156,7 +167,7 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
     },
     tui: {
       showToast: async () => {
-        spikeLog("v1_client_toast_dropped")
+        degradedLog("toast")
         return undefined
       },
     },

@@ -81,3 +81,13 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
   Note: `status` is polled in a hot loop — the real port must quiet that log.
 - No NEW `failed to load plugin` lines (only the pre-existing V1 globals).
 - `sisyphus` still visible in `debug agents` after restart.
+
+## Phase 2b exit (2026-09-25, live on 2.0.16)
+- `chat.message` → `session.prompt` hook bridged (`v2_bridge_chat_registered`;
+  pure view builders unit-tested).
+- `event` → `event.subscribe` loop bridged (`v2_bridge_event_subscribed`);
+  V2→V1 type map covers created/deleted/idle/status/execution.failed→error/
+  message.content.updated→message.updated; `message.removed` has NO V2
+  equivalent (dropped + counted). Abort on cleanup; per-event guards.
+- Degraded `todo`/`status`/`toast` logs quieted (first + every 50th).
+- 16/16 plugin-v2 tests green, `tsgo` clean, no new failed-load lines.

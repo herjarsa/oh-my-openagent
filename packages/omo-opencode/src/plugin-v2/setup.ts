@@ -3,6 +3,8 @@ import type { Hooks } from "@opencode-ai/plugin"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
 import { loadPluginConfig } from "../plugin-config"
 import { createPluginModule } from "../testing/create-plugin-module"
+import { applyChatMessageView, buildChatMessageView } from "./hook-bridge-chat"
+import { buildV1EventView } from "./hook-bridge-events"
 import { translateAgentToV2Draft } from "./translate-agent"
 import { buildV1Input, v2LocationDirectory } from "./v1-input"
 import { createV1ClientAdapter } from "./v1-client"
@@ -32,6 +34,71 @@ function safeStringify(value: unknown): string {
   }
 }
 
+async function bridgeChatMessage(ctx: V2Context, hooks: Hooks, registrations: V2Registration[]): Promise<void> {
+  const v1ChatMessage = (hooks as unknown as Record<string, unknown>)["chat.message"]
+  if (typeof v1ChatMessage !== "function") {
+    spikeLog("v2_bridge_chat_absent")
+    return
+  }
+  const handler = v1ChatMessage as (input: unknown, output: unknown) => Promise<unknown>
+  registrations.push(
+    await ctx.session.hook("prompt", async (e) => {
+      try {
+        const prompt = e.prompt as unknown as { text?: unknown }
+        const before = typeof prompt.text === "string" ? prompt.text : ""
+        const { input, output } = buildChatMessageView({ sessionID: e.sessionID, prompt: e.prompt })
+        await handler(input as never, output as never)
+        if (applyChatMessageView(prompt, before, output)) {
+          spikeLog("v2_bridge_chat_rewrote", { sessionID: e.sessionID })
+        }
+      } catch (error: unknown) {
+        // Never break prompt admission because of governance injection.
+        spikeLog("v2_bridge_chat_failed", { message: error instanceof Error ? error.message : String(error) })
+      }
+    }),
+  )
+  spikeLog("v2_bridge_chat_registered")
+}
+
+const droppedEventTypes = new Map<string, number>()
+
+async function bridgeServerEvents(
+  ctx: V2Context,
+  hooks: Hooks,
+  abort: AbortController,
+): Promise<void> {
+  const v1Event = (hooks as unknown as Record<string, unknown>)["event"]
+  if (typeof v1Event !== "function") {
+    spikeLog("v2_bridge_event_absent")
+    return
+  }
+  const handler = v1Event as (input: unknown) => Promise<unknown>
+  spikeLog("v2_bridge_event_subscribed")
+  try {
+    for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+      const rec = (event !== null && typeof event === "object" ? event : {}) as { type?: unknown; data?: unknown }
+      if (typeof rec.type !== "string") continue
+      const view = buildV1EventView({ type: rec.type, data: rec.data })
+      if (view === null) {
+        const count = (droppedEventTypes.get(rec.type) ?? 0) + 1
+        droppedEventTypes.set(rec.type, count)
+        if (count === 1) spikeLog("v2_bridge_event_dropped", { type: rec.type })
+        continue
+      }
+      try {
+        await handler({ event: view } as never)
+      } catch (error: unknown) {
+        spikeLog("v2_bridge_event_failed", {
+          type: rec.type,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  } catch (error: unknown) {
+    // Abort on cleanup lands here — expected, not an error.
+    spikeLog("v2_bridge_event_loop_ended", { message: error instanceof Error ? error.message : String(error) })
+  }
+}
 async function bridgeToolHooks(ctx: V2Context, hooks: Hooks, registrations: V2Registration[]): Promise<void> {
   const v1Before = hooks["tool.execute.before"]
   if (v1Before !== undefined) {
@@ -151,12 +218,18 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
 
       const registrations: V2Registration[] = []
       let v1dispose: (() => Promise<void>) | undefined
+      let eventAbort: AbortController | undefined
+      let eventLoop: Promise<void> | undefined
       try {
         const client = createV1ClientAdapter(ctx)
         const v1input = buildV1Input(ctx, client)
         const v1hooks = await createPluginModule().server(v1input, {})
         spikeLog("v2_factory_booted", { keys: Object.keys(v1hooks) })
         await bridgeToolHooks(ctx, v1hooks, registrations)
+        await bridgeChatMessage(ctx, v1hooks, registrations)
+        eventAbort = new AbortController()
+        eventLoop = bridgeServerEvents(ctx, v1hooks, eventAbort)
+        eventLoop.catch(() => undefined)
         if (typeof v1hooks.dispose === "function") {
           const dispose = v1hooks.dispose.bind(v1hooks)
           v1dispose = () => dispose() as Promise<void>
@@ -170,6 +243,14 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
 
       spikeLog("v2_setup_ready", { bridges: registrations.length })
       return async () => {
+        if (eventAbort !== undefined && eventLoop !== undefined) {
+          eventAbort.abort()
+          try {
+            await eventLoop
+          } catch {
+            // Abort on cleanup lands here — expected.
+          }
+        }
         for (const registration of registrations) {
           try {
             await registration.dispose()
