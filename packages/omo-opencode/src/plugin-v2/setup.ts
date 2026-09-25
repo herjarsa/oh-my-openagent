@@ -7,6 +7,7 @@ import { applyChatMessageView, buildChatMessageView } from "./hook-bridge-chat"
 import { buildV1EventView } from "./hook-bridge-events"
 import { applyChatParamsView, buildChatHeadersView, buildChatParamsView } from "./hook-bridge-params"
 import { bridgeTransforms } from "./hook-bridge-transforms"
+import { registerV1Tools } from "./tool-bridge-register"
 import { translateAgentToV2Draft } from "./translate-agent"
 import { buildV1Input, v2LocationDirectory } from "./v1-input"
 import { createV1ClientAdapter } from "./v1-client"
@@ -282,6 +283,26 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
         await bridgeToolHooks(ctx, v1hooks, registrations)
         await bridgeChatParams(ctx, v1hooks, registrations)
         await bridgeTransforms(ctx, v1hooks, registrations)
+        const v1tools = (v1hooks as unknown as { tool?: unknown }).tool
+        if (v1tools !== null && typeof v1tools === "object") {
+          try {
+            await ctx.tool.transform((editor) => {
+              const result = registerV1Tools(
+                { add: (tool) => editor.add(tool as never) },
+                v1tools as never,
+                { directory },
+              )
+              spikeLog("v2_toolmap_registered", {
+                count: result.registered.length,
+                failed: result.failed.map((entry) => entry.name),
+              })
+            })
+          } catch (error: unknown) {
+            spikeLog("v2_toolmap_failed", { message: error instanceof Error ? error.message : String(error) })
+          }
+        } else {
+          spikeLog("v2_toolmap_absent")
+        }
         await bridgeChatHeaders(ctx, v1hooks, registrations)
         await bridgeChatMessage(ctx, v1hooks, registrations)
         eventAbort = new AbortController()

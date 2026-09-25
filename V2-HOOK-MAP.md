@@ -99,3 +99,12 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
 - Setup ready with 7 bridges, zero bridge failures; full V2 event
   vocabulary enumerated via first-only drop logs.
 - 20/20 plugin-v2 tests green, `tsgo` clean, `sisyphus` visible post-restart.
+
+## Phase 3 exit (2026-09-25, live on 2.0.16)
+- Full V1 tool map registered via `tool.transform`: **27/27, 0 failures**
+  (`v2_toolmap_registered`). zod→JSON Schema through `z.toJSONSchema`;
+  execute adapted (V1 context from V2 signal + setup directory; `ask()`
+  throws descriptive unsupported; failures surface as error content).
+- 24/24 plugin-v2 tests green, `tsgo` clean, `sisyphus` visible, no new
+  failed-load lines. Execution smoke (real tool call) deferred — needs a
+  live session with token cost; structural registration is proven.
