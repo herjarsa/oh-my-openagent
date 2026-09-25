@@ -100,6 +100,20 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
   vocabulary enumerated via first-only drop logs.
 - 20/20 plugin-v2 tests green, `tsgo` clean, `sisyphus` visible post-restart.
 
+## Phase 5 exit (2026-09-25, live on 2.0.16)
+- Tier-1 MCPs via `mcp.transform`: websearch/grep_app/lsp registered per
+  location config (`context7` honored as user-disabled); local stdio shape
+  passes through with `disabled` mapping. Verified live with names.
+- Skills prune transform for `disabled_skills` (no-op when unset, guarded).
+- Full tool inventory proven live (27 named: 12 always-on + team×12 + look_at,
+  interactive_bash, edit; goal/monitor/task_* correctly absent per gates).
+- Explicitly deferred with reasons: builtin slash `commands` (V2
+  `CommandEditor` is add-only, no interception surface), Tier-3 per-session
+  skill MCPs (V2 MCP scope looks global — needs design), TUI sidebar
+  (separate `./tui` surface; user runs OpenChamber/CLI), `doctor` (CLI-side),
+  tool execution smoke (needs a live session with token cost).
+- 28/28 plugin-v2 tests green, `tsgo` clean, 10 OMO agents + 6 builtins listed.
+
 ## Phase 4 exit (2026-09-25, live on 2.0.16)
 - Full V1 agent factory (`createBuiltinAgents`) + stage-2 assembly
   (`buildPrometheusAgentConfig`, `createSisyphusJuniorAgentWithOverrides`)

@@ -7,6 +7,7 @@ import { applyChatMessageView, buildChatMessageView } from "./hook-bridge-chat"
 import { buildV1EventView } from "./hook-bridge-events"
 import { applyChatParamsView, buildChatHeadersView, buildChatParamsView } from "./hook-bridge-params"
 import { bridgeTransforms } from "./hook-bridge-transforms"
+import { registerBuiltinMcps } from "./mcp-bridge-register"
 import { registerV1Tools } from "./tool-bridge-register"
 import { createBuiltinAgents } from "../agents/builtin-agents"
 import { translateAgentConfigToV2Draft, translateAgentToV2Draft } from "./translate-agent"
@@ -252,6 +253,8 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
         disabled_agents?: string[]
         disabled_skills?: string[]
         disabled_tools?: string[]
+        disabled_mcps?: string[]
+        websearch?: { provider?: string }
         git_master?: { commit_footer?: boolean }
         browser_automation_engine?: { provider?: string }
         new_task_system_enabled?: boolean
@@ -440,6 +443,37 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
         await bridgeToolHooks(ctx, v1hooks, registrations)
         await bridgeChatParams(ctx, v1hooks, registrations)
         await bridgeTransforms(ctx, v1hooks, registrations)
+        try {
+          await ctx.mcp.transform((editor) => {
+            registerBuiltinMcps(
+              { set: (name, mcpConfig) => editor.set(name, mcpConfig as never) },
+              { disabledMcps: rootConfig.disabled_mcps, websearch: rootConfig.websearch },
+            )
+          })
+        } catch (error: unknown) {
+          spikeLog("v2_mcp_transform_failed", { message: error instanceof Error ? error.message : String(error) })
+        }
+        if (rootConfig.disabled_skills !== undefined && rootConfig.disabled_skills.length > 0) {
+          try {
+            await ctx.skill.transform((editor) => {
+              const removed: string[] = []
+              for (const name of rootConfig.disabled_skills ?? []) {
+                try {
+                  editor.remove(name)
+                  removed.push(name)
+                } catch (error: unknown) {
+                  spikeLog("v2_skill_remove_failed", {
+                    name,
+                    message: error instanceof Error ? error.message : String(error),
+                  })
+                }
+              }
+              spikeLog("v2_skills_pruned", { removed })
+            })
+          } catch (error: unknown) {
+            spikeLog("v2_skill_transform_failed", { message: error instanceof Error ? error.message : String(error) })
+          }
+        }
         const v1tools = (v1hooks as unknown as { tool?: unknown }).tool
         if (v1tools !== null && typeof v1tools === "object") {
           try {
@@ -452,6 +486,7 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
               spikeLog("v2_toolmap_registered", {
                 count: result.registered.length,
                 failed: result.failed.map((entry) => entry.name),
+                names: result.registered,
               })
             })
           } catch (error: unknown) {
