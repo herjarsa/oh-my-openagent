@@ -16,7 +16,9 @@ import { createV1ClientAdapter } from "./v1-client"
 
 // SPIKE-ONLY log. Never console.* (leaks into the TUI). The real port routes
 // diagnostics through its own file logger like meta-governor does.
-const SPIKE_LOG = "C:\\Users\\herna\\AppData\\Local\\Temp\\opencode\\omo-v2-spike-log.jsonl"
+import { portLogPath } from "./log"
+
+const SPIKE_LOG = portLogPath()
 
 function spikeLog(event: string, data: Record<string, unknown> = {}): void {
   try {

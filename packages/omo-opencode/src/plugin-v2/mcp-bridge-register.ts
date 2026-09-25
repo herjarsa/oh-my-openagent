@@ -2,7 +2,9 @@ import * as fs from "node:fs"
 import { createBuiltinMcps } from "../mcp"
 
 // SPIKE-ONLY log. Never console.* (leaks into the TUI).
-const SPIKE_LOG = "C:\\Users\\herna\\AppData\\Local\\Temp\\opencode\\omo-v2-spike-log.jsonl"
+import { portLogPath } from "./log"
+
+const SPIKE_LOG = portLogPath()
 
 function spikeLog(event: string, data: Record<string, unknown> = {}): void {
   try {
