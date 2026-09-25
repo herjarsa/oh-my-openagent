@@ -32,13 +32,17 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
 
 ## Cross-cutting gaps (ranked)
 
-1. **Agent registration — NO `editor.add`.** `AgentEditor` (SDK + docs) exposes
-   only `list/get/default/update/remove`. OMO registers 11 agents dynamically.
-   Candidates: (a) docs/SDK lag — re-check on newer `@opencode/plugin`;
-   (b) file-based custom agents (V1 had `agent_definitions` paths — check V2
-   equivalent); (c) materialize factories to a managed dir + point config at
-   it. **Phase 1 is blocked until one candidate is proven** (spike: register
-   one agent on 2.0.16 and read it back via `agent.list`).
+1. **Agent registration — CLOSED 2026-09-25 (proven live on 2.0.16).**
+   `editor.update(id, def)` acts as **upsert**: a new id is created and shows
+   up in server-level `debug agents` (`spike-probe-nonexistent` verified).
+   File-based agents (`.opencode/agents/*.md`) ALSO work (`spike-file`
+   verified). Chosen path: **update-upsert from `setup()`** — no disk state,
+   and disposing our transform registration rebuilds the registry without our
+   agents (free cleanup). Still to prove in Phase 1: full V2-shaped
+   definitions (mode/system/permissions/model/color/steps — V1 fields
+   `temperature/top_p/prompt/permission/tools/disable/maxSteps` are BANNED
+   and must map to `permissions[]`, `request`, `system`, `steps`,
+   `model: provider/model#variant`).
 2. **`config` pipeline ordering** (see #14). Spike with providers+models first
    (smallest state), then agents/tools/MCPs.
 3. **Per-session skill-embedded MCPs.** V2 `mcp.transform` `set()` looks global;
@@ -57,7 +61,7 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
 - Chasing upstream betas (pinned beta.90 per `V2-PORT.md`).
 
 ## Phase 1 entry criteria (all must hold)
-- [ ] Agent-registration spike green (gap #1 closed with a proven candidate).
+- [x] Agent-registration spike green (gap #1 closed: `editor.update` upsert proven live; file-based fallback proven).
 - [ ] `config` phase → transform mapping drafted per phase (gap #2).
 - [ ] Dual-export scaffold compiles against both SDKs (`@opencode-ai/plugin`
       1.18.31 + `@opencode/plugin` 2.0.16) with zero changes to V1 behavior.
