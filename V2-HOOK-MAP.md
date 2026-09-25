@@ -1,0 +1,63 @@
+# Phase 0 gate — V1 → V2 mapping table
+
+Sources: `packages/omo-opencode/src/plugin-interface.ts` (12 handlers) +
+`src/testing/create-plugin-module.ts` (+2) @ beta.90; `@opencode/plugin@2.0.16`
+tarball (`dist/promise/*.d.ts`); official v2 plugin docs; proven bridge in
+`omo-meta-governor@0.50.1` `src/v2/` (verified loading on this machine's
+2.0.16 server).
+
+Statuses: **DIRECT** = same pattern as meta-governor (copy + adapt) ·
+**ADAPT** = V2 target exists, needs new adapter code · **GAP** = no V2
+equivalent found, needs design or explicit defer · **SKIP** = not needed.
+
+## Handlers (`createPluginInterface`)
+
+| # | V1 handler | V2 target | Status | Notes |
+|---|---|---|---|---|
+| 1 | `tool` (12–38 ToolDefinitions) | `ctx.tool.transform` → `editor.add` | DIRECT | Needs zod→JSON-Schema conversion (same as MG `v2-tools.ts`). Config-gated tools (team/monitor/goal/hashline) re-evaluated per setup; `reload()` after config change. |
+| 2 | `tool.definition` | `ctx.tool.transform` → `editor.update` | DIRECT | MG bridges description write-back; parameter-schema mutations apply in place. Ours is `todo-description-override` — same shape. |
+| 3 | `tool.execute.before` | `ctx.tool.hook("execute.before")` | DIRECT | Live-view pattern (`output.args` getter/setter → `e.input`); rethrow preserves block semantics. |
+| 4 | `tool.execute.after` | `ctx.tool.hook("execute.after")` | DIRECT | Completed/error → V1 `(input, outputView)` view; never throw (guarded). |
+| 5 | `experimental.chat.system.transform` | `ctx.session.hook("context")` (system part) | DIRECT | String-backed view over text SystemParts, positional write-back (MG proven). Covers ultrawork injection, rules-injector, keyword-detector, status injectors. |
+| 6 | `experimental.chat.messages.transform` | same `context` hook (messages part) | DIRECT | V1-shaped VIEW copy (never push V1 objects into host array); appended messages translated to V2 assistant messages. Covers context-injector, pair-validator, mailbox injector. |
+| 7 | `experimental.session.compacting` | `ctx.session.hook("compaction")` | DIRECT | `output.context[]` lines → text SystemParts; `prompt` override has no V2 field → fold to system (best-effort, logged). Covers compaction-context-injector + todo-preserver. |
+| 8 | `chat.message` (first-message gate, keyword detect, session setup) | `ctx.session.hook("prompt")` | ADAPT | `prompt.text/files/agents/skills` mutable draft + `delivery`. First-message variant logic portable; verify `sessionID`/`agent` availability matches V1 `input` fields. |
+| 9 | `chat.params` (model fallback, variant, think mode, effort) | `ctx.session.hook("context")` (`options`) + `retry` | ADAPT | `options` mutable per call; model itself is readonly in context. Proactive fallback (variant/effort/temperature) → options; reactive fallback (provider errors) → `retry` hook (`event.decision`). Split the current handler accordingly. |
+| 10 | `chat.headers` (Copilot `x-initiator`) | `ctx.session.hook("model.request")` (`headers`) | DIRECT | Trivial draft mutation, provider-scopable. |
+| 11 | `command.execute.before` (slash interception) | — | GAP | MG explicitly skipped: no V2 hook, `CommandEditor` has `add` only. OMO's own commands (goal, refactor, ulw-execute…) can re-register via `editor.add` with wrapped `execute`. Interception of *foreign* commands likely impossible → defer or WONT-PORT per command. |
+| 12 | `event` (session lifecycle, team events ×4, openclaw dispatch, fallback) | `ctx.event.subscribe` (AsyncIterable) | ADAPT | Event catalog (`V2EventEncoded`) lives outside the plugin SDK — enumerate from docs/API before coding. Team wake-hints + openclaw need dispatch via `ctx.session.prompt` (exists ✓). Must avoid double-delivery (MG skipped its event hook as redundant — ours is NOT redundant, it carries session/team lifecycle). |
+| 13 | `experimental.compaction.autocontinue` | — | GAP | MG skipped (no equivalent). OMO auto-resume after compaction needs a design (poll `session.wait`? event-watch?) or explicit deferral. |
+| 14 | `config` (6-phase pipeline) | `provider/agent/tool/skill/command/mcp/model` transforms | ADAPT | **Top risk.** No `config` domain. Each phase maps to a transform: providers→`provider.transform`, agents→(see gap below), tools→`tool.transform`, MCPs→`mcp.transform` (`set`/`update`), commands→`command.transform`, models→`model.transform`. The pipeline currently runs as ONE handler with ordering guarantees; V2 replays transforms per-domain in registration order — phase ordering must be re-established explicitly in `setup()`. |
+| 15 | `tool` map disposal / `dispose` | setup `Cleanup` return | DIRECT | Dispose V2 registrations first, then V1 dispose (MG order). |
+
+## Cross-cutting gaps (ranked)
+
+1. **Agent registration — NO `editor.add`.** `AgentEditor` (SDK + docs) exposes
+   only `list/get/default/update/remove`. OMO registers 11 agents dynamically.
+   Candidates: (a) docs/SDK lag — re-check on newer `@opencode/plugin`;
+   (b) file-based custom agents (V1 had `agent_definitions` paths — check V2
+   equivalent); (c) materialize factories to a managed dir + point config at
+   it. **Phase 1 is blocked until one candidate is proven** (spike: register
+   one agent on 2.0.16 and read it back via `agent.list`).
+2. **`config` pipeline ordering** (see #14). Spike with providers+models first
+   (smallest state), then agents/tools/MCPs.
+3. **Per-session skill-embedded MCPs.** V2 `mcp.transform` `set()` looks global;
+   OMO keys Tier-3 clients per `${sessionID}:${skill}:${server}`. Check
+   session-scoping support or accept global-with-namespacing.
+4. **`chat.params` model switching.** If context-hook `model` is readonly and
+   `retry` only covers failures, proactive model override needs another path
+   (`switchModel`? model transforms?). Spike during Phase 2.
+5. **TUI sidebar** (`tui.sidebar.enabled`) → separate `./tui` export surface.
+   Defer to Phase 5; server plugin must load without it.
+6. **V2 API churn.** 2.0.16 is early V2 (`experimental.ws.*` may move). Pin
+   `@opencode/plugin@2.0.16`; re-verify `agent.d.ts` on every SDK bump.
+
+## Explicit non-goals for the port
+- `experimental.provider.small_model`, permission flows OMO doesn't use.
+- Chasing upstream betas (pinned beta.90 per `V2-PORT.md`).
+
+## Phase 1 entry criteria (all must hold)
+- [ ] Agent-registration spike green (gap #1 closed with a proven candidate).
+- [ ] `config` phase → transform mapping drafted per phase (gap #2).
+- [ ] Dual-export scaffold compiles against both SDKs (`@opencode-ai/plugin`
+      1.18.31 + `@opencode/plugin` 2.0.16) with zero changes to V1 behavior.
