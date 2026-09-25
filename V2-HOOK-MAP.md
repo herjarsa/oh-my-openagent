@@ -71,3 +71,13 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
 - `translate-agent.test.ts` 4/4, `tsgo --noEmit` clean, V1 export-shape test green.
 - Trap found: editor path requires `Model.Ref` `{providerID, id}` — the docs'
   expanded `{providerID, model}` form is rejected server-side.
+
+## Phase 2a exit (2026-09-25, live on 2.0.16)
+- Full V1 factory boots inside V2 `setup()` with the adapted client:
+  all 15 hook keys present, zero factory failures.
+- `tool.execute.before/after` bridged (2 registrations); setup ready.
+- V1 hooks execute live code paths (degraded `todo`/`status` stubs hit by
+  background polling — logged, harmless; real mapping is Phase 2b work).
+  Note: `status` is polled in a hot loop — the real port must quiet that log.
+- No NEW `failed to load plugin` lines (only the pre-existing V1 globals).
+- `sisyphus` still visible in `debug agents` after restart.
