@@ -8,7 +8,8 @@ import { buildV1EventView } from "./hook-bridge-events"
 import { applyChatParamsView, buildChatHeadersView, buildChatParamsView } from "./hook-bridge-params"
 import { bridgeTransforms } from "./hook-bridge-transforms"
 import { registerV1Tools } from "./tool-bridge-register"
-import { translateAgentToV2Draft } from "./translate-agent"
+import { createBuiltinAgents } from "../agents/builtin-agents"
+import { translateAgentConfigToV2Draft, translateAgentToV2Draft } from "./translate-agent"
 import { buildV1Input, v2LocationDirectory } from "./v1-input"
 import { createV1ClientAdapter } from "./v1-client"
 
@@ -245,30 +246,186 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
         spikeLog("v2_model_failed", { message: error instanceof Error ? error.message : String(error) })
       }
 
-      const agents = (config as unknown as { agents?: Record<string, unknown> }).agents ?? {}
-      const sisyphus = agents["sisyphus"]
-      if (sisyphus !== null && typeof sisyphus === "object") {
-        const draft = translateAgentToV2Draft("sisyphus", sisyphus as Parameters<typeof translateAgentToV2Draft>[1])
-        if (draft !== null) {
+      const rootConfig = config as unknown as {
+        agents?: Record<string, unknown>
+        categories?: Record<string, never>
+        disabled_agents?: string[]
+        disabled_skills?: string[]
+        disabled_tools?: string[]
+        git_master?: { commit_footer?: boolean }
+        browser_automation_engine?: { provider?: string }
+        new_task_system_enabled?: boolean
+        experimental?: { disable_omo_env?: boolean }
+        team_mode?: { enabled?: boolean }
+        sisyphus_agent?: { planner_enabled?: boolean }
+      }
+      const agents = rootConfig.agents ?? {}
+      const applyDraft = (
+        editor: {
+          update: (id: string, update: (agent: unknown) => void) => void
+        },
+        id: string,
+        draft: {
+          description?: string
+          mode?: "primary" | "subagent" | "all"
+          model?: { providerID: string; id: string; variant?: string }
+          color?: string
+          steps?: number
+          system?: string
+          permissions?: { action: string; resource: string; effect: "allow" | "ask" | "deny" }[]
+        },
+      ): void => {
+        editor.update(id, (agent) => {
+          const target = agent as unknown as Record<string, unknown>
+          if (draft.description !== undefined) target["description"] = draft.description
+          if (draft.mode !== undefined) target["mode"] = draft.mode
+          if (draft.model !== undefined) target["model"] = draft.model
+          if (draft.color !== undefined) target["color"] = draft.color
+          if (draft.steps !== undefined) target["steps"] = draft.steps
+          if (draft.system !== undefined) target["system"] = draft.system
+          if (draft.permissions !== undefined) target["permissions"] = draft.permissions
+        })
+      }
+
+      // Full path: resolve all builtin agents through the real V1 factory
+      // (categories, overrides, model chains) and upsert each in ONE transform.
+      let fullAgentsDone = false
+      try {
+        const builtin = await createBuiltinAgents(
+          rootConfig.disabled_agents ?? [],
+          (rootConfig.agents ?? {}) as never,
+          directory,
+          undefined,
+          rootConfig.categories as never,
+          rootConfig.git_master as never,
+          [],
+          undefined,
+          rootConfig.browser_automation_engine?.provider as never,
+          undefined,
+          rootConfig.disabled_skills !== undefined ? new Set(rootConfig.disabled_skills) : undefined,
+          rootConfig.new_task_system_enabled ?? false,
+          rootConfig.experimental?.disable_omo_env ?? false,
+          rootConfig.team_mode?.enabled ?? false,
+        )
+        const entries = Object.entries(builtin)
+        await ctx.agent.transform((editor) => {
+          for (const [name, agentConfig] of entries) {
+            const draft = translateAgentConfigToV2Draft(name, agentConfig as never)
+            if (draft === null) {
+              spikeLog("v2_agent_skipped", { id: name, reason: "disabled" })
+              continue
+            }
+            try {
+              applyDraft(
+                editor as never,
+                draft.id,
+                draft as never,
+              )
+            } catch (error: unknown) {
+              spikeLog("v2_agent_failed", {
+                id: name,
+                message: error instanceof Error ? error.message : String(error),
+              })
+            }
+          }
+        })
+        spikeLog("v2_agents_upserted", { count: entries.length, names: entries.map(([name]) => name) })
+        fullAgentsDone = true
+
+        // Stage 2 (mirrors createCoreAgentConfig in
+        // plugin-handlers/agent-config-assembly.ts): prometheus via its
+        // builder (when the planner is enabled) and sisyphus-junior via its
+        // overrides factory. Neither comes out of createBuiltinAgents.
+        const extraAgents: Array<{ id: string; config: unknown }> = []
+        try {
+          if (rootConfig.sisyphus_agent?.planner_enabled ?? true) {
+            const { buildPrometheusAgentConfig } = await import(
+              "../plugin-handlers/prometheus-agent-config-builder"
+            )
+            extraAgents.push({
+              id: "prometheus",
+              config: await buildPrometheusAgentConfig({
+                configAgentPlan: undefined,
+                pluginPrometheusOverride: (rootConfig.agents?.["prometheus"] ?? undefined) as never,
+                userCategories: rootConfig.categories as never,
+                currentModel: undefined,
+                disabledTools: rootConfig.disabled_tools,
+              }),
+            })
+          }
+        } catch (error: unknown) {
+          spikeLog("v2_agent_prometheus_failed", { message: error instanceof Error ? error.message : String(error) })
+        }
+        try {
+          const { createSisyphusJuniorAgentWithOverrides } = await import("../agents/sisyphus-junior")
+          const atlasModel = (builtin["atlas"] !== null && typeof builtin["atlas"] === "object"
+            ? (builtin["atlas"] as Record<string, unknown>)["model"]
+            : undefined) as string | undefined
+          extraAgents.push({
+            id: "sisyphus-junior",
+            config: createSisyphusJuniorAgentWithOverrides(
+              (rootConfig.agents?.["sisyphus-junior"] ?? undefined) as never,
+              atlasModel,
+              rootConfig.new_task_system_enabled ?? false,
+            ),
+          })
+        } catch (error: unknown) {
+          spikeLog("v2_agent_junior_failed", { message: error instanceof Error ? error.message : String(error) })
+        }
+        if (extraAgents.length > 0) {
           try {
             await ctx.agent.transform((editor) => {
-              editor.update(draft.id, (agent) => {
-                const target = agent as unknown as Record<string, unknown>
-                if (draft.description !== undefined) target["description"] = draft.description
-                if (draft.mode !== undefined) target["mode"] = draft.mode
-                if (draft.model !== undefined) target["model"] = draft.model
-                if (draft.color !== undefined) target["color"] = draft.color
-              })
+              for (const { id, config: agentConfig } of extraAgents) {
+                const draft = translateAgentConfigToV2Draft(id, agentConfig as never)
+                if (draft === null) {
+                  spikeLog("v2_agent_skipped", { id, reason: "disabled" })
+                  continue
+                }
+                try {
+                  applyDraft(editor as never, draft.id, draft as never)
+                } catch (error: unknown) {
+                  spikeLog("v2_agent_failed", {
+                    id,
+                    message: error instanceof Error ? error.message : String(error),
+                  })
+                }
+              }
             })
-            spikeLog("v2_agent_upserted", { id: draft.id, model: draft.model })
+            spikeLog("v2_agents_extra_upserted", { names: extraAgents.map(({ id }) => id) })
           } catch (error: unknown) {
-            spikeLog("v2_agent_failed", { message: error instanceof Error ? error.message : String(error) })
+            spikeLog("v2_agents_extra_failed", { message: error instanceof Error ? error.message : String(error) })
+          }
+        }
+      } catch (error: unknown) {
+        spikeLog("v2_agents_factory_failed", { message: error instanceof Error ? error.message : String(error) })
+      }
+
+      // Fallback: sisyphus-only override translation (Phase 1 path).
+      if (!fullAgentsDone) {
+        const sisyphus = agents["sisyphus"]
+        if (sisyphus !== null && typeof sisyphus === "object") {
+          const draft = translateAgentToV2Draft("sisyphus", sisyphus as Parameters<typeof translateAgentToV2Draft>[1])
+          if (draft !== null) {
+            try {
+              await ctx.agent.transform((editor) => {
+                editor.update(draft.id, (agent) => {
+                  const target = agent as unknown as Record<string, unknown>
+                  if (draft.description !== undefined) target["description"] = draft.description
+                  if (draft.mode !== undefined) target["mode"] = draft.mode
+                  if (draft.model !== undefined) target["model"] = draft.model
+                  if (draft.color !== undefined) target["color"] = draft.color
+                })
+              })
+              spikeLog("v2_agent_upserted", { id: draft.id, model: draft.model })
+            } catch (error: unknown) {
+              spikeLog("v2_agent_failed", { message: error instanceof Error ? error.message : String(error) })
+            }
+          } else {
+            spikeLog("v2_agent_skipped", { id: "sisyphus", reason: "disabled" })
           }
         } else {
-          spikeLog("v2_agent_skipped", { id: "sisyphus", reason: "disabled" })
+          spikeLog("v2_agent_skipped", { id: "sisyphus", reason: "no-override" })
         }
-      } else {
-        spikeLog("v2_agent_skipped", { id: "sisyphus", reason: "no-override" })
       }
 
       const registrations: V2Registration[] = []

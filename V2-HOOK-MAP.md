@@ -100,6 +100,15 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
   vocabulary enumerated via first-only drop logs.
 - 20/20 plugin-v2 tests green, `tsgo` clean, `sisyphus` visible post-restart.
 
+## Phase 4 exit (2026-09-25, live on 2.0.16)
+- Full V1 agent factory (`createBuiltinAgents`) + stage-2 assembly
+  (`buildPrometheusAgentConfig`, `createSisyphusJuniorAgentWithOverrides`)
+  run in `setup()`; all resolved agents upserted with description, mode,
+  model (`Model.Ref`), color, steps, system prompt and deny-rules.
+- Server-level `debug agents`: **10 OMO agents** (all except hephaestus,
+  gated by the user's own muse-spark chain — V1 logs the identical skip).
+- 26/26 plugin-v2 tests green, `tsgo` clean.
+
 ## Phase 3 exit (2026-09-25, live on 2.0.16)
 - Full V1 tool map registered via `tool.transform`: **27/27, 0 failures**
   (`v2_toolmap_registered`). zod→JSON Schema through `z.toJSONSchema`;

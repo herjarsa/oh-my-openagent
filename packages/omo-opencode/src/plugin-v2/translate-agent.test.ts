@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { translateAgentToV2Draft } from "./translate-agent"
+import { translateAgentConfigToV2Draft, translateAgentToV2Draft } from "./translate-agent"
 
 describe("translateAgentToV2Draft", () => {
   it("#given a string models chain #when translated #then the first entry splits provider and model", () => {
@@ -45,5 +45,42 @@ describe("translateAgentToV2Draft", () => {
 
     // then
     expect(draft).toBeNull()
+  })
+})
+
+describe("translateAgentConfigToV2Draft", () => {
+  it("#given a full AgentConfig #when translated #then system permissions and steps map over", () => {
+    // when
+    const draft = translateAgentConfigToV2Draft("librarian", {
+      description: "Docs",
+      mode: "subagent",
+      model: "opencode-go/kimi-k3",
+      color: "#ff6b6b",
+      maxSteps: 8,
+      prompt: "Write docs.",
+      tools: { write: false, edit: false, task: false },
+      permission: { bash: { rm: "deny", git: "allow" } },
+    })
+
+    // then
+    expect(draft).toMatchObject({
+      id: "librarian",
+      mode: "subagent",
+      model: { providerID: "opencode-go", id: "kimi-k3" },
+      system: "Write docs.",
+      steps: 8,
+    })
+    expect(draft?.permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+    expect(draft?.permissions).toContainEqual({ action: "task", resource: "*", effect: "deny" })
+    expect(draft?.permissions).toContainEqual({ action: "bash", resource: "rm", effect: "deny" })
+    expect(draft?.permissions).not.toContainEqual({ action: "bash", resource: "git", effect: "allow" })
+  })
+
+  it("#given an invalid mode #when translated #then it defaults to all", () => {
+    // when
+    const draft = translateAgentConfigToV2Draft("x", { mode: "sometimes" })
+
+    // then
+    expect(draft?.mode).toBe("all")
   })
 })
