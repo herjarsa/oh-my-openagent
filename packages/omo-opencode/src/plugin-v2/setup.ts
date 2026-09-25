@@ -5,6 +5,8 @@ import { loadPluginConfig } from "../plugin-config"
 import { createPluginModule } from "../testing/create-plugin-module"
 import { applyChatMessageView, buildChatMessageView } from "./hook-bridge-chat"
 import { buildV1EventView } from "./hook-bridge-events"
+import { applyChatParamsView, buildChatHeadersView, buildChatParamsView } from "./hook-bridge-params"
+import { bridgeTransforms } from "./hook-bridge-transforms"
 import { translateAgentToV2Draft } from "./translate-agent"
 import { buildV1Input, v2LocationDirectory } from "./v1-input"
 import { createV1ClientAdapter } from "./v1-client"
@@ -61,6 +63,58 @@ async function bridgeChatMessage(ctx: V2Context, hooks: Hooks, registrations: V2
 }
 
 const droppedEventTypes = new Map<string, number>()
+
+async function bridgeChatParams(ctx: V2Context, hooks: Hooks, registrations: V2Registration[]): Promise<void> {
+  const v1ChatParams = (hooks as unknown as Record<string, unknown>)["chat.params"]
+  if (typeof v1ChatParams !== "function") {
+    spikeLog("v2_bridge_params_absent")
+    return
+  }
+  const handler = v1ChatParams as (input: unknown, output: unknown) => Promise<unknown>
+  registrations.push(
+    await ctx.session.hook("context", async (e) => {
+      try {
+        const view = buildChatParamsView({
+          sessionID: e.sessionID,
+          agent: (e as unknown as { agent?: unknown }).agent,
+          model: (e as unknown as { model?: { providerID?: unknown; id?: unknown } }).model,
+          options: e.options as Record<string, unknown>,
+        })
+        if (view === null) return
+        await handler(view.input as never, view.output as never)
+        applyChatParamsView(e.options as Record<string, unknown>, view.output)
+      } catch (error: unknown) {
+        spikeLog("v2_bridge_params_failed", { message: error instanceof Error ? error.message : String(error) })
+      }
+    }),
+  )
+  spikeLog("v2_bridge_params_registered")
+}
+
+async function bridgeChatHeaders(ctx: V2Context, hooks: Hooks, registrations: V2Registration[]): Promise<void> {
+  const v1ChatHeaders = (hooks as unknown as Record<string, unknown>)["chat.headers"]
+  if (typeof v1ChatHeaders !== "function") {
+    spikeLog("v2_bridge_headers_absent")
+    return
+  }
+  const handler = v1ChatHeaders as (input: unknown, output: unknown) => Promise<unknown>
+  registrations.push(
+    await ctx.session.hook("model.request", async (e) => {
+      try {
+        const view = buildChatHeadersView({
+          sessionID: e.sessionID,
+          model: (e as unknown as { model?: { providerID?: unknown } }).model,
+        })
+        if (view === null) return
+        await handler(view.input as never, view.output as never)
+        Object.assign(e.headers, view.output.headers)
+      } catch (error: unknown) {
+        spikeLog("v2_bridge_headers_failed", { message: error instanceof Error ? error.message : String(error) })
+      }
+    }),
+  )
+  spikeLog("v2_bridge_headers_registered")
+}
 
 async function bridgeServerEvents(
   ctx: V2Context,
@@ -226,6 +280,9 @@ export function createV2SpikeSetup(): V2Plugin.Plugin {
         const v1hooks = await createPluginModule().server(v1input, {})
         spikeLog("v2_factory_booted", { keys: Object.keys(v1hooks) })
         await bridgeToolHooks(ctx, v1hooks, registrations)
+        await bridgeChatParams(ctx, v1hooks, registrations)
+        await bridgeTransforms(ctx, v1hooks, registrations)
+        await bridgeChatHeaders(ctx, v1hooks, registrations)
         await bridgeChatMessage(ctx, v1hooks, registrations)
         eventAbort = new AbortController()
         eventLoop = bridgeServerEvents(ctx, v1hooks, eventAbort)

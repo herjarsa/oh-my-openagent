@@ -91,3 +91,11 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
   equivalent (dropped + counted). Abort on cleanup; per-event guards.
 - Degraded `todo`/`status`/`toast` logs quieted (first + every 50th).
 - 16/16 plugin-v2 tests green, `tsgo` clean, no new failed-load lines.
+
+## Phase 2c exit (2026-09-25, live on 2.0.16)
+- `chat.params` → `context` hook (live options view + scalar write-back).
+- system+messages transforms → shared `context` hook; `compacting` hook;
+  `tool.definition` via `tool.transform`; `chat.headers` → `model.request`.
+- Setup ready with 7 bridges, zero bridge failures; full V2 event
+  vocabulary enumerated via first-only drop logs.
+- 20/20 plugin-v2 tests green, `tsgo` clean, `sisyphus` visible post-restart.
