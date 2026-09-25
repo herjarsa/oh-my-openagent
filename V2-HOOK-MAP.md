@@ -38,11 +38,10 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
    File-based agents (`.opencode/agents/*.md`) ALSO work (`spike-file`
    verified). Chosen path: **update-upsert from `setup()`** — no disk state,
    and disposing our transform registration rebuilds the registry without our
-   agents (free cleanup). Still to prove in Phase 1: full V2-shaped
-   definitions (mode/system/permissions/model/color/steps — V1 fields
-   `temperature/top_p/prompt/permission/tools/disable/maxSteps` are BANNED
-   and must map to `permissions[]`, `request`, `system`, `steps`,
-   `model: provider/model#variant`).
+   agents (free cleanup). Phase 1 PROVEN end-to-end 2026-09-25: `sisyphus`
+   upserted from live `omo.jsonc` appears in server-level `debug agents`
+   with `model: {providerID: "opencode-go", id: "muse-spark-1.3-contributor"}`.
+   Full V2-shaped definitions (system/permissions/steps) remain Phase 4 work.
 2. **`config` pipeline ordering** (see #14). Spike with providers+models first
    (smallest state), then agents/tools/MCPs.
 3. **Per-session skill-embedded MCPs.** V2 `mcp.transform` `set()` looks global;
@@ -62,6 +61,13 @@ equivalent found, needs design or explicit defer · **SKIP** = not needed.
 
 ## Phase 1 entry criteria (all must hold)
 - [x] Agent-registration spike green (gap #1 closed: `editor.update` upsert proven live; file-based fallback proven).
-- [ ] `config` phase → transform mapping drafted per phase (gap #2).
-- [ ] Dual-export scaffold compiles against both SDKs (`@opencode-ai/plugin`
+- [x] `config` phase → transform mapping drafted per phase (gap #2, table row #14).
+- [x] Dual-export scaffold compiles against both SDKs (`@opencode-ai/plugin`
       1.18.31 + `@opencode/plugin` 2.0.16) with zero changes to V1 behavior.
+
+## Phase 1 exit (2026-09-25, all green live on 2.0.16)
+- `plugin list`: ID `oh-my-openagent` registered (local probe build).
+- `debug agents`: `sisyphus` present with live `omo.jsonc` model.
+- `translate-agent.test.ts` 4/4, `tsgo --noEmit` clean, V1 export-shape test green.
+- Trap found: editor path requires `Model.Ref` `{providerID, id}` — the docs'
+  expanded `{providerID, model}` form is rejected server-side.
