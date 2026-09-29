@@ -27,8 +27,8 @@ type SessionGetResult = {
 }
 
 export interface OmoAgentClient {
-  readonly app: {
-    readonly agents: () => Promise<unknown>
+  readonly app?: {
+    readonly agents?: () => Promise<unknown>
   }
   readonly config: {
     readonly get: () => Promise<unknown>

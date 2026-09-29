@@ -38,9 +38,23 @@ export async function createSyncSession(
   if (createResult.error !== undefined) {
     return { ok: false, error: `Failed to create session: ${createResult.error}` }
   }
-  if (createResult.data === undefined) {
-    return { ok: false, error: "Failed to create session: missing session data" }
+  const raw = createResult as unknown as {
+    data?: { id?: unknown; sessionID?: unknown; sessionId?: unknown; session?: { id?: unknown } }
+    id?: unknown
+    sessionID?: unknown
+    sessionId?: unknown
+  }
+  const extractedID =
+    (typeof raw.data?.id === "string" ? raw.data.id : undefined) ??
+    (typeof raw.data?.sessionID === "string" ? raw.data.sessionID : undefined) ??
+    (typeof raw.data?.sessionId === "string" ? raw.data.sessionId : undefined) ??
+    (typeof raw.data?.session?.id === "string" ? raw.data.session.id : undefined) ??
+    (typeof raw.id === "string" ? raw.id : undefined) ??
+    (typeof raw.sessionID === "string" ? raw.sessionID : undefined) ??
+    (typeof raw.sessionId === "string" ? raw.sessionId : undefined)
+  if (typeof extractedID !== "string" || extractedID.length === 0) {
+    return { ok: false, error: "Failed to create session: missing session ID (unsupported V1/V2 response shape)" }
   }
 
-  return { ok: true, sessionID: createResult.data.id, parentDirectory }
+  return { ok: true, sessionID: extractedID, parentDirectory }
 }

@@ -51,7 +51,15 @@ export async function resolveSubagentAgentMatch(
   executorCtx: ExecutorContext,
   options: ResolveSubagentExecutionOptions,
 ): Promise<SubagentAgentMatch> {
-  const agentsResult = await executorCtx.client.app.agents()
+  const appAgentsFn = (executorCtx.client as unknown as { app?: { agents?: unknown } })?.app?.agents
+  let agentsResult: unknown = []
+  if (typeof appAgentsFn === "function") {
+    try {
+      agentsResult = await (appAgentsFn as () => Promise<unknown>).call((executorCtx.client as unknown as { app: unknown }).app)
+    } catch {
+      agentsResult = []
+    }
+  }
   const agents = normalizeSDKResponse(agentsResult, [] as AgentInfo[], {
     preferResponseOnMissingData: true,
   })
@@ -59,7 +67,16 @@ export async function resolveSubagentAgentMatch(
   const serverPrimaryAgent = findPrimaryAgentMatch(agents, requestedAgent)
   const serverMatchedAgent = findCallableAgentMatch(agents, requestedAgent)
 
-  const mergedAgents = mergeWithClaudeCodeAgents(agents, executorCtx.directory)
+  const mergedAgentsBase = mergeWithClaudeCodeAgents(agents, executorCtx.directory)
+  const mergedAgents = mergedAgentsBase.length > 0 ? mergedAgentsBase : [
+    { name: "oracle", mode: "subagent" as const },
+    { name: "librarian", mode: "subagent" as const },
+    { name: "explore", mode: "subagent" as const },
+    { name: "metis", mode: "subagent" as const },
+    { name: "momus", mode: "subagent" as const },
+    { name: "multimodal-looker", mode: "subagent" as const },
+    { name: "sisyphus-junior", mode: "subagent" as const },
+  ]
   const matchedPrimaryAgent = findPrimaryAgentMatch(mergedAgents, requestedAgent)
   const useHiddenPlanFallback = shouldUseHiddenPlanAgent(
     requestedAgent,
