@@ -847,3 +847,108 @@ describe("pollSyncSession", () => {
     })
   })
 })
+describe("no-progress fail-fast", () => {
+  beforeEach(() => {
+    __setTimingConfig({ POLL_INTERVAL_MS: 10, MAX_POLL_TIME_MS: 5000 })
+  })
+
+  afterEach(() => {
+    __resetTimingConfig()
+  })
+  test("returns stall error when idle with static messages", async () => {
+    // given: idle child, one user message, nothing ever changes
+    const { pollSyncSession } = require("./sync-session-poller")
+    let abortCalled = 0
+    const mockClient = {
+      session: {
+        messages: async () => ({
+          data: [{ info: { id: "msg_001", role: "user", time: { created: 1000 } }, parts: [] }],
+        }),
+        status: async () => ({ data: { "ses_stalled": { type: "idle" } } }),
+
+        abort: async () => { abortCalled++ },
+      },
+    }
+
+    // when: polling a dead child
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_stalled",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+    })
+
+    // then: fail-fast stall error naming the session, abort called
+    expect(result).toContain("Task stalled")
+    expect(result).toContain("ses_stalled")
+    expect(abortCalled).toBe(1)
+  })
+
+  test("resets the stall counter while status is active", async () => {
+    // given: busy for a while, then idle with static messages
+    const { pollSyncSession } = require("./sync-session-poller")
+    let statusCalls = 0
+    const mockClient = {
+      session: {
+        messages: async () => ({
+          data: [{ info: { id: "msg_001", role: "user", time: { created: 1000 } }, parts: [] }],
+        }),
+        status: async () => {
+          statusCalls++
+          return { data: { "ses_flap": { type: statusCalls <= 70 ? "busy" : "idle" } } }
+        },
+        abort: async () => ({}),
+      },
+    }
+
+    // when: polling past the stall threshold with an active window first
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_flap",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+    })
+
+    // then: stall fires only after the idle stretch, not during busy
+    expect(result).toContain("Task stalled")
+    expect(statusCalls).toBeGreaterThan(70)
+  })
+
+  test("does not stall while a child continuation is owed", async () => {
+    // given: incomplete messages while continuation owed, complete right after release
+    const { pollSyncSession } = require("./sync-session-poller")
+    let phaseChecks = 0
+    const incompleteMessages = {
+      data: [{ info: { id: "msg_001", role: "user", time: { created: 1000 } }, parts: [] }],
+    }
+    const completeMessages = {
+      data: [
+        { info: { id: "msg_001", role: "user", time: { created: 1000 } }, parts: [] },
+        {
+          info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "stop" },
+          parts: [{ type: "text", text: "done" }],
+        },
+      ],
+    }
+    const mockClient = {
+      session: {
+        messages: async () => (phaseChecks <= 3 ? incompleteMessages : completeMessages),
+        status: async () => ({ data: { "ses_wake": { type: "idle" } } }),
+        abort: async () => ({}),
+      },
+    }
+    const stillOwed = () => ++phaseChecks <= 3
+
+    // when: continuation owed, then released with complete messages
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_wake",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+      hasActiveChildBackgroundTasks: stillOwed,
+    })
+
+    // then: completes normally once the wake lands, no stall
+    expect(result).toBeNull()
+  })
+})

@@ -10,6 +10,7 @@ export { isSessionComplete } from "./sync-session-turns"
 const ACTIVE_SESSION_STATUSES = new Set(["busy", "retry", "running"])
 const CHILD_WAKE_GRACE_MS = 5_000
 const MAX_NON_ACTIVE_STATUS_STALENESS_POLLS = 10
+const MAX_IDLE_NO_PROGRESS_POLLS = 60
 
 function wait(milliseconds: number): Promise<void> {
   const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
@@ -77,6 +78,7 @@ export async function pollSyncSession(
   const pollStart = Date.now()
   let inactiveStart = pollStart
   let pollCount = 0
+  let idleNoProgressPolls = 0
   let nonActivePollsSinceMessageFetch = 0
   let lastStatusRevision: string | undefined
   let hasFetchedNonActiveMessages = false
@@ -192,6 +194,26 @@ export async function pollSyncSession(
     const statusChanged = statusRevision !== undefined && String(statusRevision) !== lastStatusRevision
     if (statusChanged) inactiveStart = Date.now()
 
+    // Fail fast on a dead child: idle status with no new messages for a full
+    // minute means the subagent errored without producing a response (provider
+    // quota, unavailable model). Waiting out the 30-minute inactivity bound
+    // just leaves the parent staring at a spinner. Owed child continuations
+    // are exempt: a wake may still land and move the messages forward.
+    const continuationOwed =
+      (input.hasActiveChildBackgroundTasks?.(input.sessionID) ?? false) ||
+      (input.hasPendingParentWake?.(input.sessionID) ?? false)
+    if (isActive || statusChanged || continuationOwed) {
+      idleNoProgressPolls = 0
+    } else {
+      idleNoProgressPolls++
+      if (idleNoProgressPolls >= MAX_IDLE_NO_PROGRESS_POLLS) {
+        log("[task] Poll no-progress timeout reached", { sessionID: input.sessionID, pollCount })
+        abortSyncSession(client, input.sessionID, "no_progress")
+        if (input.toastManager && input.taskId) input.toastManager.removeTask(input.taskId)
+        return `Task stalled: subagent session ${input.sessionID} was idle for ${idleNoProgressPolls} polls with no new messages. The child likely failed (provider quota or unavailable model) without producing a response. Session ID: ${input.sessionID}`
+      }
+    }
+
     // An active status (busy/retry/running) is not progress by itself: a child that hit a
     // terminal provider error can sit in "busy" forever with an unchanged message set.
     // Keep inspecting messages on the same staleness cadence so the error surfaces and the
@@ -221,7 +243,10 @@ export async function pollSyncSession(
       (messages.length !== lastObservedMessageCount || currentAssistantId !== lastObservedAssistantId)
     lastObservedMessageCount = messages.length
     lastObservedAssistantId = currentAssistantId
-    if (messageStateChanged) inactiveStart = Date.now()
+    if (messageStateChanged) {
+      inactiveStart = Date.now()
+      idleNoProgressPolls = 0
+    }
 
     const sessionError = getTerminalSessionError(messages)
     if (sessionError) {
