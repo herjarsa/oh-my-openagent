@@ -12,13 +12,29 @@ type SessionAdapter = {
   create: (input: unknown) => Promise<unknown>
 }
 
-function adapterWith(session: Record<string, unknown>): SessionAdapter {
-  const client = createV1ClientAdapter({ session } as never) as { session: SessionAdapter }
+function adapterWith(session: Record<string, unknown>, event?: Record<string, unknown>): SessionAdapter {
+  const client = createV1ClientAdapter({ session, ...(event === undefined ? {} : { event }) } as never) as {
+    session: SessionAdapter
+  }
   return client.session
 }
 
+async function waitForStatus(
+  session: SessionAdapter,
+  sessionID: string,
+  timeoutMs = 2000,
+): Promise<Record<string, { type: string }>> {
+  const started = Date.now()
+  for (;;) {
+    const res = (await session.status()) as { data: Record<string, { type: string }> }
+    if (res.data[sessionID] !== undefined) return res.data
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for status of ${sessionID}`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 describe("createV1ClientAdapter", () => {
-  it("#given a V1 promptAsync call #when adapted #then it dispatches flat sessionID and text", async () => {
+  it("#given a V1 promptAsync call #when adapted #then it dispatches V2 prompt input shape", async () => {
     // given
     const calls: unknown[] = []
     const session = adapterWith({
@@ -32,8 +48,76 @@ describe("createV1ClientAdapter", () => {
     const res = await session.promptAsync({ path: { id: "ses-1" }, body: { parts: [{ type: "text", text: "hi" }] } })
 
     // then
-    expect(calls).toEqual([{ sessionID: "ses-1", text: "hi" }])
+    expect(calls).toEqual([{ sessionID: "ses-1", text: { text: "hi" } }])
     expect(res).toEqual({ data: { info: { id: "msg-1" } } })
+  })
+
+  it("#given a V1 prompt with agent #when adapted #then it switches agent before prompting", async () => {
+    // given
+    const calls: unknown[] = []
+    const session = adapterWith({
+      switchAgent: async (input: unknown) => {
+        calls.push(["switchAgent", input])
+      },
+      prompt: async (input: unknown) => {
+        calls.push(["prompt", input])
+        return { id: "msg-2", sessionID: "ses-1" }
+      },
+    })
+
+    // when
+    const res = await session.promptAsync({
+      path: { id: "ses-1" },
+      body: { agent: "oracle", parts: [{ type: "text", text: "hi" }] },
+    })
+
+    // then
+    expect(calls).toEqual([
+      ["switchAgent", { sessionID: "ses-1", agent: "oracle" }],
+      ["prompt", { sessionID: "ses-1", text: { text: "hi" } }],
+    ])
+    expect(res).toEqual({ data: { info: { id: "msg-2" } } })
+  })
+
+  it("#given a V1 prompt with model #when adapted #then it switches model with V2 ref shape", async () => {
+    // given
+    const calls: unknown[] = []
+    const session = adapterWith({
+      switchModel: async (input: unknown) => {
+        calls.push(input)
+      },
+      prompt: async (input: unknown) => {
+        calls.push(input)
+        return { id: "msg-3", sessionID: "ses-1" }
+      },
+    })
+
+    // when
+    await session.promptAsync({
+      path: { id: "ses-1" },
+      body: { model: { providerID: "p", modelID: "m" }, parts: [{ type: "text", text: "hi" }] },
+    })
+
+    // then
+    expect(calls).toEqual([
+      { sessionID: "ses-1", model: { id: "m", providerID: "p" } },
+      { sessionID: "ses-1", text: { text: "hi" } },
+    ])
+  })
+
+  it("#given a V2 prompt throw #when prompt runs #then it resolves null without throwing", async () => {
+    // given
+    const session = adapterWith({
+      prompt: async () => {
+        throw new Error("boom-prompt")
+      },
+    })
+
+    // when
+    const res = await session.promptAsync({ path: { id: "ses-1" }, body: { parts: [{ type: "text", text: "hi" }] } })
+
+    // then
+    expect(res).toBeNull()
   })
 
   it("#given V1 messages #when adapted #then context wraps into info and parts", async () => {
@@ -202,6 +286,81 @@ describe("createV1ClientAdapter", () => {
 
     // then
     expect(res).toEqual({ data: {} })
+  })
+
+  it("#given V2 session status events #when status runs #then it maps busy retry and idle", async () => {
+    // given
+    async function* events(): AsyncIterable<unknown> {
+      yield { type: "session.status", data: { sessionID: "ses-busy", status: { type: "busy" } } }
+      yield { type: "session.status", data: { sessionID: "ses-retry", status: { type: "retry", attempt: 2 } } }
+      yield { type: "session.idle", data: { sessionID: "ses-idle" } }
+    }
+    const session = adapterWith({}, { subscribe: () => events() })
+
+    // when
+    const busy = await waitForStatus(session, "ses-busy")
+    const retry = await waitForStatus(session, "ses-retry")
+    const idle = await waitForStatus(session, "ses-idle")
+
+    // then
+    expect(busy["ses-busy"]).toMatchObject({ type: "busy" })
+    expect(retry["ses-retry"]).toMatchObject({ type: "retry" })
+    expect(idle["ses-idle"]).toEqual({ type: "idle" })
+  })
+
+  it("#given V2 execution lifecycle events #when status runs #then started is busy and terminal is idle", async () => {
+    // given
+    async function* events(): AsyncIterable<unknown> {
+      yield { type: "session.execution.started", data: { sessionID: "ses-run" } }
+      yield { type: "session.execution.succeeded", data: { sessionID: "ses-done" } }
+    }
+    const session = adapterWith({}, { subscribe: () => events() })
+
+    // when
+    const run = await waitForStatus(session, "ses-run")
+    const done = await waitForStatus(session, "ses-done")
+
+    // then
+    expect(run["ses-run"]).toEqual({ type: "busy" })
+    expect(done["ses-done"]).toEqual({ type: "idle" })
+  })
+
+  it("#given events and active disagree #when status runs #then the event transition wins", async () => {
+    // given
+    async function* events(): AsyncIterable<unknown> {
+      yield { type: "session.idle", data: { sessionID: "ses-1" } }
+    }
+    const session = adapterWith(
+      { active: async () => ({ "ses-1": { type: "running" } }) },
+      { subscribe: () => events() },
+    )
+
+    // when
+    const started = Date.now()
+    let data: Record<string, { type: string }> = {}
+    for (;;) {
+      data = await waitForStatus(session, "ses-1")
+      if (data["ses-1"]?.type === "idle" || Date.now() - started > 2000) break
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+
+    // then
+    expect(data["ses-1"]).toEqual({ type: "idle" })
+  })
+
+  it("#given sessions without confirmed state #when status runs #then they stay absent", async () => {
+    // given
+    async function* events(): AsyncIterable<unknown> {
+      yield { type: "session.idle", data: { sessionID: "ses-known" } }
+    }
+    const session = adapterWith({}, { subscribe: () => events() })
+    await waitForStatus(session, "ses-known")
+
+    // when
+    const res = (await session.status()) as { data: Record<string, unknown> }
+
+    // then
+    expect(res.data["ses-unknown"]).toBeUndefined()
   })
 
   it("#given V2 user and assistant messages #when adapted #then role finish and parts map to V1", async () => {

@@ -33,6 +33,17 @@ type V2Session = {
   create?: (input: unknown) => Promise<unknown>
   active?: (input?: unknown) => Promise<unknown>
   interrupt?: (input: unknown) => Promise<unknown>
+  switchAgent?: (input: unknown) => Promise<unknown>
+  switchModel?: (input: unknown) => Promise<unknown>
+}
+
+type V2EventDomain = {
+  subscribe?: (input?: unknown) => AsyncIterable<unknown>
+}
+
+type StatusEntry = {
+  type: string
+  [key: string]: unknown
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -81,6 +92,92 @@ function shapeFingerprint(value: unknown): { keys: Array<string>; preview: strin
 function v2Session(ctx: V2Plugin.Context): V2Session {
   const session = (ctx as unknown as { session?: unknown }).session
   return (session !== null && typeof session === "object" ? session : {}) as V2Session
+}
+
+function v2Event(ctx: V2Plugin.Context): V2EventDomain {
+  const event = (ctx as unknown as { event?: unknown }).event
+  return (event !== null && typeof event === "object" ? event : {}) as V2EventDomain
+}
+
+function agentOf(input: unknown): string | undefined {
+  const body = asRecord(asRecord(input)?.["body"])
+  if (body === null) return undefined
+  return stringField(body, "agent")
+}
+
+function modelOf(input: unknown): { id: string; providerID: string; variant?: string } | undefined {
+  const body = asRecord(asRecord(input)?.["body"])
+  if (body === null) return undefined
+  const model = asRecord(body["model"])
+  if (model === null) return undefined
+  // V1 model shape is {providerID, modelID}; V2 Model.Ref is {id, providerID}.
+  const providerID = stringField(model, "providerID")
+  const id = stringField(model, "modelID") ?? stringField(model, "id")
+  if (providerID === undefined || id === undefined) return undefined
+  const variant = stringField(model, "variant")
+  return variant === undefined ? { id, providerID } : { id, providerID, variant }
+}
+
+/**
+ * Fold one V2 event into the status table. Only V2-confirmed states land here:
+ * the authoritative `session.status` event ({sessionID, status: SessionStatus}),
+ * `session.idle`, and the execution lifecycle edges. Unknown sessions stay absent
+ * so V1 pollers fall back to message inspection instead of reading a fake idle.
+ */
+function applyStatusEvent(table: Map<string, StatusEntry>, event: unknown): void {
+  const rec = asRecord(event)
+  if (rec === null) return
+  const type = stringField(rec, "type")
+  const data = asRecord(rec["data"])
+  if (type === undefined || data === null) return
+  const sessionID = stringField(data, "sessionID")
+  if (sessionID === undefined) return
+  if (type === "session.status") {
+    const status = asRecord(data["status"])
+    const statusType = status !== null ? stringField(status, "type") : undefined
+    if (statusType !== undefined) table.set(sessionID, { ...status as Record<string, unknown>, type: statusType })
+    return
+  }
+  if (type === "session.idle") {
+    table.set(sessionID, { type: "idle" })
+    return
+  }
+  if (type === "session.execution.started") {
+    table.set(sessionID, { type: "busy" })
+    return
+  }
+  if (
+    type === "session.execution.succeeded"
+    || type === "session.execution.failed"
+    || type === "session.execution.interrupted"
+  ) {
+    table.set(sessionID, { type: "idle" })
+    return
+  }
+  if (type === "session.deleted") {
+    table.delete(sessionID)
+  }
+}
+
+function startStatusTracking(eventDomain: V2EventDomain, table: Map<string, StatusEntry>): void {
+  if (typeof eventDomain.subscribe !== "function") {
+    spikeLog("v1_client_status_events_unavailable")
+    return
+  }
+  const subscribe = eventDomain.subscribe.bind(eventDomain)
+  void (async () => {
+    try {
+      for await (const event of subscribe()) {
+        applyStatusEvent(table, event)
+      }
+      spikeLog("v1_client_status_events_ended", { reason: "stream-closed" })
+    } catch (error: unknown) {
+      spikeLog("v1_client_status_events_ended", {
+        reason: "error",
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })()
 }
 
 function sessionIDOf(input: unknown, fallback = ""): string {
@@ -175,7 +272,9 @@ function messageToView(message: unknown, sessionID: string): { info: unknown; pa
 /**
  * V1 SDK client adapter over the V2 setup context.
  * Delegated (real V2 calls): session.get/messages/prompt/promptAsync/create/
- * status (via active)/abort (via interrupt).
+ * status (session.status/idle/execution events plus an active() merge when the
+ * host exposes one)/abort (via interrupt). Prompt carries V2 SessionPromptInput
+ * shape ({sessionID, text: {text}}) with agent/model applied via switch calls.
  * Degraded (no V2 equivalent, empty envelope + warn): session.todo/children.
  * TUI toasts are no-ops (V2 promise ctx has no TUI surface).
  * Never throws out of delegated methods — failures resolve to empty
@@ -183,30 +282,55 @@ function messageToView(message: unknown, sessionID: string): { info: unknown; pa
  */
 export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
   const session = v2Session(ctx)
+  const statusTable = new Map<string, StatusEntry>()
+  startStatusTracking(v2Event(ctx), statusTable)
 
   const promptLike = (v1input: unknown) => {
     const sessionID = sessionIDOf(v1input)
     const text = textOf(v1input)
-    if (typeof session.prompt !== "function" || sessionID.length === 0) {
+    const promptFn = session.prompt
+    if (typeof promptFn !== "function" || sessionID.length === 0) {
+      log("[v1-client] session.prompt delegated", {
+        sessionID: sessionID.length > 0 ? sessionID : "unknown",
+        ok: false,
+        error: "prompt unavailable or missing sessionID",
+      })
       spikeLog("v1_client_prompt_skipped", { sessionID: sessionID.length > 0 })
       return Promise.resolve(null)
     }
-    // V2 SessionPromptInput is flat ({sessionID, text, ...}); the agent/model
-    // travel with the session (create/switch), not the prompt.
-    return session.prompt({ sessionID, text }).then(
-      (res) => {
+    if (text.length === 0) {
+      log("[v1-client] session.prompt delegated", { sessionID, ok: false, error: "empty prompt text" })
+      spikeLog("v1_client_prompt_empty", { sessionID })
+      return Promise.resolve(null)
+    }
+    return (async () => {
+      try {
+        // V1 carries agent/model per prompt (body.agent, body.model); V2 keeps
+        // them on the session, so switch first. A failed switch returns null
+        // loudly instead of running the prompt under the wrong agent/model.
+        const agent = agentOf(v1input)
+        if (agent !== undefined && typeof session.switchAgent === "function") {
+          await session.switchAgent({ sessionID, agent })
+        }
+        const model = modelOf(v1input)
+        if (model !== undefined && typeof session.switchModel === "function") {
+          await session.switchModel({ sessionID, model })
+        }
+        // V2 SessionPromptInput.text is an object ({text, ...}), never a flat
+        // string: sending the string form is rejected by the host and the
+        // prompt silently never runs.
+        const res = await promptFn({ sessionID, text: { text } })
         const id = extractMessageId(res)
         log("[v1-client] session.prompt delegated", { sessionID, ok: true, messageID: id ?? "unknown" })
         spikeLog("v1_client_prompt_ok", { sessionID })
         return id ? { data: { info: { id } } } : null
-      },
-      (error: unknown) => {
+      } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         log("[v1-client] session.prompt delegated", { sessionID, ok: false, error: message })
         spikeLog("v1_client_prompt_failed", { message })
         return null
-      },
-    )
+      }
+    })()
   }
 
   const degradedList = (name: string) => {
@@ -244,31 +368,33 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
       promptAsync: promptLike,
       todo: degradedList("todo"),
       status: async () => {
-        // V1 status() resolves the full {[sessionID]: {type}} table; V2 only
-        // exposes active() -> {[sessionID]: {type: "running"}}. Sessions absent
-        // from the table are idle, which is exactly what the V1 pollers need
-        // to judge completion via messages.
-        if (typeof session.active !== "function") {
-          degradedLog("status")
-          return { data: {} }
-        }
-        try {
-          const res = await session.active()
-          const record = asRecord(res) ?? {}
-          // Tolerate a {data: {...}} envelope defensively.
-          const table = asRecord(record["data"]) ?? record
-          const out: Record<string, { type: string }> = {}
-          for (const [id, value] of Object.entries(table)) {
-            const entry = asRecord(value)
-            const type = entry !== null ? stringField(entry, "type") : undefined
-            if (type !== undefined) out[id] = { type }
+        // V1 status() resolves the full {[sessionID]: {type}} table. V2 has no
+        // status endpoint on the plugin context: the table is rebuilt from two
+        // honest sources. (1) The `session.status` / `session.idle` /
+        // execution-lifecycle event stream, tracked since adapter creation.
+        // (2) A live active() pull when the host exposes one. Event entries
+        // overlay the pull (transitions are the freshest signal). Sessions with
+        // no confirmed state stay absent so V1 pollers fall back to message
+        // inspection instead of reading a fake idle.
+        const out: Record<string, StatusEntry> = {}
+        if (typeof session.active === "function") {
+          try {
+            const res = await session.active()
+            const record = asRecord(res) ?? {}
+            // Tolerate a {data: {...}} envelope defensively.
+            const table = asRecord(record["data"]) ?? record
+            for (const [id, value] of Object.entries(table)) {
+              const entry = asRecord(value)
+              const type = entry !== null ? stringField(entry, "type") : undefined
+              if (type !== undefined) out[id] = { type }
+            }
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error)
+            spikeLog("v1_client_status_failed", { message })
           }
-          return { data: out }
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error)
-          spikeLog("v1_client_status_failed", { message })
-          return { data: {} }
         }
+        for (const [id, entry] of statusTable) out[id] = { ...entry }
+        return { data: out }
       },
       abort: async (v1input: unknown) => {
         if (typeof session.interrupt !== "function") {
