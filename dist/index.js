@@ -135034,7 +135034,7 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
   const { client: client3, syncPollTimeoutMs, sisyphusAgentConfig } = executorCtx;
   const toastManager = getTaskToastManager();
   const continuationID = getTaskID(args);
-  if (!continuationID) {
+  if (typeof continuationID !== "string" || continuationID.length === 0) {
     throw new Error("task_id is required to continue a sync task");
   }
   cancelSyncSessionDeletion(continuationID);
@@ -135661,10 +135661,12 @@ async function createSyncSession(client3, input) {
   if (createResult.error !== undefined) {
     return { ok: false, error: `Failed to create session: ${createResult.error}` };
   }
-  if (createResult.data === undefined) {
-    return { ok: false, error: "Failed to create session: missing session data" };
+  const raw = createResult;
+  const extractedID = (typeof raw.data?.id === "string" ? raw.data.id : undefined) ?? (typeof raw.data?.sessionID === "string" ? raw.data.sessionID : undefined) ?? (typeof raw.data?.sessionId === "string" ? raw.data.sessionId : undefined) ?? (typeof raw.data?.session?.id === "string" ? raw.data.session.id : undefined) ?? (typeof raw.id === "string" ? raw.id : undefined) ?? (typeof raw.sessionID === "string" ? raw.sessionID : undefined) ?? (typeof raw.sessionId === "string" ? raw.sessionId : undefined);
+  if (typeof extractedID !== "string" || extractedID.length === 0) {
+    return { ok: false, error: "Failed to create session: missing session ID (unsupported V1/V2 response shape)" };
   }
-  return { ok: true, sessionID: createResult.data.id, parentDirectory };
+  return { ok: true, sessionID: extractedID, parentDirectory };
 }
 
 // packages/omo-opencode/src/tools/delegate-task/sync-prompt-sender.ts
@@ -136194,6 +136196,10 @@ async function executeSyncTask(args, ctx, executorCtx, parentContext, agentToUse
       return createSessionResult.error;
     }
     const sessionID = createSessionResult.sessionID;
+    if (typeof sessionID !== "string" || sessionID.length === 0) {
+      spawnReservation?.rollback();
+      return "Failed to create session: missing session ID (unsupported V1/V2 response shape)";
+    }
     spawnReservation?.commit();
     syncSessionID = sessionID;
     const registerSyncSession = async (newSessionID) => {
@@ -136709,14 +136715,31 @@ function shouldUseHiddenPlanAgent(requestedAgent, serverPrimaryAgent, serverMatc
   return sisyphusAgentConfig?.planner_enabled !== false && sisyphusAgentConfig?.replace_plan !== false;
 }
 async function resolveSubagentAgentMatch(requestedAgent, executorCtx, options) {
-  const agentsResult = await executorCtx.client.app.agents();
+  const appAgentsFn = executorCtx.client?.app?.agents;
+  let agentsResult = [];
+  if (typeof appAgentsFn === "function") {
+    try {
+      agentsResult = await appAgentsFn.call(executorCtx.client.app);
+    } catch {
+      agentsResult = [];
+    }
+  }
   const agents = normalizeSDKResponse(agentsResult, [], {
     preferResponseOnMissingData: true
   });
   const hasDemotedPlan = agents.some(isDemotedPlanAgent);
   const serverPrimaryAgent = findPrimaryAgentMatch(agents, requestedAgent);
   const serverMatchedAgent = findCallableAgentMatch(agents, requestedAgent);
-  const mergedAgents = mergeWithClaudeCodeAgents(agents, executorCtx.directory);
+  const mergedAgentsBase = mergeWithClaudeCodeAgents(agents, executorCtx.directory);
+  const mergedAgents = mergedAgentsBase.length > 0 ? mergedAgentsBase : [
+    { name: "oracle", mode: "subagent" },
+    { name: "librarian", mode: "subagent" },
+    { name: "explore", mode: "subagent" },
+    { name: "metis", mode: "subagent" },
+    { name: "momus", mode: "subagent" },
+    { name: "multimodal-looker", mode: "subagent" },
+    { name: "sisyphus-junior", mode: "subagent" }
+  ];
   const matchedPrimaryAgent = findPrimaryAgentMatch(mergedAgents, requestedAgent);
   const useHiddenPlanFallback = shouldUseHiddenPlanAgent(requestedAgent, serverPrimaryAgent, serverMatchedAgent, executorCtx.sisyphusAgentConfig, hasDemotedPlan);
   if (isReservedHiddenNativeAgent(requestedAgent) && !serverPrimaryAgent && !serverMatchedAgent) {

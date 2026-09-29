@@ -105,7 +105,7 @@ export async function executeSyncContinuation(
   const { client, syncPollTimeoutMs, sisyphusAgentConfig } = executorCtx
   const toastManager = getTaskToastManager()
   const continuationID = getTaskID(args)
-  if (!continuationID) {
+  if (typeof continuationID !== "string" || continuationID.length === 0) {
     throw new Error("task_id is required to continue a sync task")
   }
   cancelSyncSessionDeletion(continuationID)

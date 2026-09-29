@@ -61,6 +61,10 @@ export async function executeSyncTask(
     }
 
     const sessionID = createSessionResult.sessionID
+    if (typeof sessionID !== "string" || sessionID.length === 0) {
+      spawnReservation?.rollback()
+      return "Failed to create session: missing session ID (unsupported V1/V2 response shape)"
+    }
     spawnReservation?.commit()
     syncSessionID = sessionID
 
