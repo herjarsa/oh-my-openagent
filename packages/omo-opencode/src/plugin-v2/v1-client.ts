@@ -1,5 +1,6 @@
 import * as fs from "node:fs"
 import type { Plugin as V2Plugin } from "@opencode/plugin"
+import { log } from "../shared"
 
 // SPIKE-ONLY log. Never console.* (leaks into the TUI).
 import { portLogPath } from "./log"
@@ -29,6 +30,50 @@ type V2Session = {
   get?: (input: unknown) => Promise<unknown>
   context?: (input: unknown) => Promise<unknown>
   prompt?: (input: unknown) => Promise<unknown>
+  create?: (input: unknown) => Promise<unknown>
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const candidate = record[key]
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined
+}
+
+/**
+ * Unwrap a V2 session.create result into {id, directory}.
+ * V2 resolves SessionInfo directly ({id, location: {directory}}), but
+ * tolerate envelope wrappers ({data, session, info}) defensively.
+ */
+function unwrapSessionInfo(value: unknown): { id: string; directory: string; raw: Record<string, unknown> } | null {
+  const candidates: unknown[] = [value]
+  const top = asRecord(value)
+  if (top !== null) {
+    for (const key of ["data", "session", "info"]) candidates.push(top[key])
+  }
+  for (const candidate of candidates) {
+    const record = asRecord(candidate)
+    if (record === null) continue
+    const id = stringField(record, "id")
+    if (id === undefined) continue
+    const location = asRecord(record["location"])
+    const directory = (location !== null ? stringField(location, "directory") : undefined) ?? stringField(record, "directory") ?? ""
+    return { id, directory, raw: record }
+  }
+  return null
+}
+
+function shapeFingerprint(value: unknown): { keys: Array<string>; preview: string } {
+  const top = asRecord(value)
+  let preview: string
+  try {
+    preview = JSON.stringify(value)?.slice(0, 200) ?? String(value).slice(0, 200)
+  } catch {
+    preview = String(value).slice(0, 200)
+  }
+  return { keys: top ? Object.keys(top) : [], preview }
 }
 
 function v2Session(ctx: V2Plugin.Context): V2Session {
@@ -111,9 +156,9 @@ function messageToView(message: unknown, sessionID: string): { info: unknown; pa
 
 /**
  * V1 SDK client adapter over the V2 setup context.
- * Delegated (real V2 calls): session.get/messages/prompt/promptAsync.
+ * Delegated (real V2 calls): session.get/messages/prompt/promptAsync/create.
  * Degraded (no V2 equivalent, empty envelope + warn): session.todo/status/
- * children/create. TUI toasts are no-ops (V2 promise ctx has no TUI surface).
+ * children. TUI toasts are no-ops (V2 promise ctx has no TUI surface).
  * Never throws out of delegated methods — failures resolve to empty
  * envelopes so V1 hooks degrade instead of crashing the host call.
  */
@@ -165,7 +210,44 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
       todo: degradedList("todo"),
       status: degradedList("status"),
       children: degradedList("children"),
-      create: degradedList("create"),
+      create: async (v1input: unknown) => {
+        if (typeof session.create !== "function") {
+          spikeLog("v1_client_create_unavailable")
+          return { data: undefined, error: "session.create unavailable on V2 host" }
+        }
+        const outer = asRecord(v1input) ?? {}
+        const body = asRecord(outer["body"]) ?? {}
+        const query = asRecord(outer["query"]) ?? {}
+        // V1 SDK shape: {body: {parentID?, title?, permission?, model?}, query: {directory?}}.
+        // V2 SessionCreateInput is flat: {title?, agent?, model?, location?, metadata?, permissions?}.
+        // V1 permission ({permission, action, pattern}) is NOT V2 PermissionRule
+        // ({action, resource, effect}) — never forward it, a schema mismatch
+        // would fail the create. parentID has no V2 field; keep it in metadata.
+        const v2input: Record<string, unknown> = {}
+        const title = stringField(body, "title")
+        if (title !== undefined) v2input["title"] = title
+        if (asRecord(body["model"]) !== null) v2input["model"] = body["model"]
+        const directory = stringField(query, "directory")
+        if (directory !== undefined) v2input["location"] = { directory }
+        const parentID = stringField(body, "parentID")
+        if (parentID !== undefined) v2input["metadata"] = { parentID }
+        try {
+          const res = await session.create(v2input)
+          const info = unwrapSessionInfo(res)
+          if (info === null) {
+            log("[v1-client] session.create delegated", { ok: false, ...shapeFingerprint(res) })
+            spikeLog("v1_client_create_shape", shapeFingerprint(res))
+            return { data: undefined, error: "session.create returned unsupported shape" }
+          }
+          log("[v1-client] session.create delegated", { ok: true, id: info.id })
+          return { data: { ...info.raw, id: info.id, directory: info.directory.length > 0 ? info.directory : (directory ?? "") } }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          log("[v1-client] session.create delegated", { ok: false, error: message })
+          spikeLog("v1_client_create_failed", { message })
+          return { data: undefined, error: message }
+        }
+      },
     },
     tui: {
       showToast: async () => {
