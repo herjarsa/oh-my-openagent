@@ -274,7 +274,7 @@ function messageToView(message: unknown, sessionID: string): { info: unknown; pa
  * Delegated (real V2 calls): session.get/messages/prompt/promptAsync/create/
  * status (session.status/idle/execution events plus an active() merge when the
  * host exposes one)/abort (via interrupt). Prompt carries V2 SessionPromptInput
- * shape ({sessionID, text: {text}}) with agent/model applied via switch calls.
+ * shape ({sessionID, text}) with agent/model applied via switch calls.
  * Degraded (no V2 equivalent, empty envelope + warn): session.todo/children.
  * TUI toasts are no-ops (V2 promise ctx has no TUI surface).
  * Never throws out of delegated methods — failures resolve to empty
@@ -316,10 +316,10 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
         if (model !== undefined && typeof session.switchModel === "function") {
           await session.switchModel({ sessionID, model })
         }
-        // V2 SessionPromptInput.text is an object ({text, ...}), never a flat
-        // string: sending the string form is rejected by the host and the
-        // prompt silently never runs.
-        const res = await promptFn({ sessionID, text: { text } })
+        // Live host (opencode v2.0.19) validates prompt `text` as a flat
+        // string: sending the object form is rejected with
+        // `Expected string at ["text"]` and the prompt silently never runs.
+        const res = await promptFn({ sessionID, text })
         const id = extractMessageId(res)
         log("[v1-client] session.prompt delegated", { sessionID, ok: true, messageID: id ?? "unknown" })
         spikeLog("v1_client_prompt_ok", { sessionID })

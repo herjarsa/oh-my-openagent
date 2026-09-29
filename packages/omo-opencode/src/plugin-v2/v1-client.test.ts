@@ -34,7 +34,7 @@ async function waitForStatus(
 }
 
 describe("createV1ClientAdapter", () => {
-  it("#given a V1 promptAsync call #when adapted #then it dispatches V2 prompt input shape", async () => {
+  it("#given a V1 promptAsync call #when adapted #then it dispatches flat sessionID and text", async () => {
     // given
     const calls: unknown[] = []
     const session = adapterWith({
@@ -48,7 +48,7 @@ describe("createV1ClientAdapter", () => {
     const res = await session.promptAsync({ path: { id: "ses-1" }, body: { parts: [{ type: "text", text: "hi" }] } })
 
     // then
-    expect(calls).toEqual([{ sessionID: "ses-1", text: { text: "hi" } }])
+    expect(calls).toEqual([{ sessionID: "ses-1", text: "hi" }])
     expect(res).toEqual({ data: { info: { id: "msg-1" } } })
   })
 
@@ -74,7 +74,7 @@ describe("createV1ClientAdapter", () => {
     // then
     expect(calls).toEqual([
       ["switchAgent", { sessionID: "ses-1", agent: "oracle" }],
-      ["prompt", { sessionID: "ses-1", text: { text: "hi" } }],
+      ["prompt", { sessionID: "ses-1", text: "hi" }],
     ])
     expect(res).toEqual({ data: { info: { id: "msg-2" } } })
   })
@@ -101,7 +101,7 @@ describe("createV1ClientAdapter", () => {
     // then
     expect(calls).toEqual([
       { sessionID: "ses-1", model: { id: "m", providerID: "p" } },
-      { sessionID: "ses-1", text: { text: "hi" } },
+      { sessionID: "ses-1", text: "hi" },
     ])
   })
 
