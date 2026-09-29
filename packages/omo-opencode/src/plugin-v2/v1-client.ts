@@ -31,6 +31,8 @@ type V2Session = {
   context?: (input: unknown) => Promise<unknown>
   prompt?: (input: unknown) => Promise<unknown>
   create?: (input: unknown) => Promise<unknown>
+  active?: (input?: unknown) => Promise<unknown>
+  interrupt?: (input: unknown) => Promise<unknown>
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -144,21 +146,38 @@ function textPartOf(part: unknown): { type: string; text: string } | null {
 function messageToView(message: unknown, sessionID: string): { info: unknown; parts: unknown[] } {
   if (message === null || typeof message !== "object") return { info: { sessionID }, parts: [] }
   const rec = message as Record<string, unknown>
+  // V2 SessionMessageInfo carries the kind in `type` ("user" | "assistant" |
+  // "synthetic" | ...), user text in `text`, assistant parts in `content[]`,
+  // and terminal state in top-level `finish` / `error`. V1 callers need
+  // {info: {role, finish, error}, parts}. An explicit V1 `role` (tests,
+  // legacy callers) still wins over the V2 `type` mapping.
+  const rawType = typeof rec["type"] === "string" ? (rec["type"] as string) : undefined
+  const role = typeof rec["role"] === "string"
+    ? (rec["role"] as string)
+    : rawType === "assistant" ? "assistant" : "user"
   const content = rec["content"]
   const parts = Array.isArray(content)
     ? content.map(textPartOf).filter((p) => p !== null)
-    : []
-  return {
-    info: { sessionID, id: rec["id"], role: rec["role"] ?? "user", ...(typeof rec["info"] === "object" ? rec["info"] as Record<string, unknown> : {}) },
-    parts,
+    : typeof rec["text"] === "string" && (rec["text"] as string).length > 0
+      ? [{ type: "text", text: rec["text"] as string }]
+      : []
+  const info: Record<string, unknown> = {
+    sessionID,
+    id: rec["id"],
+    role,
+    ...(typeof rec["finish"] === "string" ? { finish: rec["finish"] } : {}),
+    ...(rec["error"] !== undefined && rec["error"] !== null ? { error: rec["error"] } : {}),
+    ...(typeof rec["info"] === "object" && rec["info"] !== null ? (rec["info"] as Record<string, unknown>) : {}),
   }
+  return { info, parts }
 }
 
 /**
  * V1 SDK client adapter over the V2 setup context.
- * Delegated (real V2 calls): session.get/messages/prompt/promptAsync/create.
- * Degraded (no V2 equivalent, empty envelope + warn): session.todo/status/
- * children. TUI toasts are no-ops (V2 promise ctx has no TUI surface).
+ * Delegated (real V2 calls): session.get/messages/prompt/promptAsync/create/
+ * status (via active)/abort (via interrupt).
+ * Degraded (no V2 equivalent, empty envelope + warn): session.todo/children.
+ * TUI toasts are no-ops (V2 promise ctx has no TUI surface).
  * Never throws out of delegated methods — failures resolve to empty
  * envelopes so V1 hooks degrade instead of crashing the host call.
  */
@@ -172,13 +191,19 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
       spikeLog("v1_client_prompt_skipped", { sessionID: sessionID.length > 0 })
       return Promise.resolve(null)
     }
+    // V2 SessionPromptInput is flat ({sessionID, text, ...}); the agent/model
+    // travel with the session (create/switch), not the prompt.
     return session.prompt({ sessionID, text }).then(
       (res) => {
         const id = extractMessageId(res)
+        log("[v1-client] session.prompt delegated", { sessionID, ok: true, messageID: id ?? "unknown" })
+        spikeLog("v1_client_prompt_ok", { sessionID })
         return id ? { data: { info: { id } } } : null
       },
       (error: unknown) => {
-        spikeLog("v1_client_prompt_failed", { message: error instanceof Error ? error.message : String(error) })
+        const message = error instanceof Error ? error.message : String(error)
+        log("[v1-client] session.prompt delegated", { sessionID, ok: false, error: message })
+        spikeLog("v1_client_prompt_failed", { message })
         return null
       },
     )
@@ -196,6 +221,16 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
       get: async (v1input: unknown) => {
         if (typeof session.get !== "function") return { data: null }
         const res = await session.get({ sessionID: sessionIDOf(v1input) })
+        // V1 Session carries a top-level `directory`; V2 SessionInfo carries
+        // `location.directory`. Surface both so V1 callers keep working.
+        const record = asRecord(res)
+        if (record !== null) {
+          const location = asRecord(record["location"])
+          const directory = (location !== null ? stringField(location, "directory") : undefined)
+          if (directory !== undefined && stringField(record, "directory") === undefined) {
+            return { data: { ...record, directory } }
+          }
+        }
         return { data: res }
       },
       messages: async (v1input: unknown) => {
@@ -208,7 +243,47 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
       prompt: promptLike,
       promptAsync: promptLike,
       todo: degradedList("todo"),
-      status: degradedList("status"),
+      status: async () => {
+        // V1 status() resolves the full {[sessionID]: {type}} table; V2 only
+        // exposes active() -> {[sessionID]: {type: "running"}}. Sessions absent
+        // from the table are idle, which is exactly what the V1 pollers need
+        // to judge completion via messages.
+        if (typeof session.active !== "function") {
+          degradedLog("status")
+          return { data: {} }
+        }
+        try {
+          const res = await session.active()
+          const record = asRecord(res) ?? {}
+          // Tolerate a {data: {...}} envelope defensively.
+          const table = asRecord(record["data"]) ?? record
+          const out: Record<string, { type: string }> = {}
+          for (const [id, value] of Object.entries(table)) {
+            const entry = asRecord(value)
+            const type = entry !== null ? stringField(entry, "type") : undefined
+            if (type !== undefined) out[id] = { type }
+          }
+          return { data: out }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          spikeLog("v1_client_status_failed", { message })
+          return { data: {} }
+        }
+      },
+      abort: async (v1input: unknown) => {
+        if (typeof session.interrupt !== "function") {
+          spikeLog("v1_client_abort_unavailable")
+          return { data: undefined, error: "session.interrupt unavailable on V2 host" }
+        }
+        try {
+          await session.interrupt({ sessionID: sessionIDOf(v1input) })
+          return { data: true }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          spikeLog("v1_client_abort_failed", { message })
+          return { data: undefined, error: message }
+        }
+      },
       children: degradedList("children"),
       create: async (v1input: unknown) => {
         if (typeof session.create !== "function") {
@@ -218,7 +293,7 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
         const outer = asRecord(v1input) ?? {}
         const body = asRecord(outer["body"]) ?? {}
         const query = asRecord(outer["query"]) ?? {}
-        // V1 SDK shape: {body: {parentID?, title?, permission?, model?}, query: {directory?}}.
+        // V1 SDK shape: {body: {parentID?, title?, agent?, permission?, model?}, query: {directory?}}.
         // V2 SessionCreateInput is flat: {title?, agent?, model?, location?, metadata?, permissions?}.
         // V1 permission ({permission, action, pattern}) is NOT V2 PermissionRule
         // ({action, resource, effect}) — never forward it, a schema mismatch
@@ -226,6 +301,8 @@ export function createV1ClientAdapter(ctx: V2Plugin.Context): unknown {
         const v2input: Record<string, unknown> = {}
         const title = stringField(body, "title")
         if (title !== undefined) v2input["title"] = title
+        const agent = stringField(body, "agent")
+        if (agent !== undefined) v2input["agent"] = agent
         if (asRecord(body["model"]) !== null) v2input["model"] = body["model"]
         const directory = stringField(query, "directory")
         if (directory !== undefined) v2input["location"] = { directory }
