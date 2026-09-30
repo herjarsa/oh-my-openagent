@@ -136919,11 +136919,7 @@ async function resolveSubagentAgentMatch(requestedAgent, executorCtx, options) {
   const appAgentsFn = executorCtx.client?.app?.agents;
   let agentsResult = [];
   if (typeof appAgentsFn === "function") {
-    try {
-      agentsResult = await appAgentsFn.call(executorCtx.client.app);
-    } catch {
-      agentsResult = [];
-    }
+    agentsResult = await appAgentsFn.call(executorCtx.client.app);
   }
   const agents = normalizeSDKResponse(agentsResult, [], {
     preferResponseOnMissingData: true

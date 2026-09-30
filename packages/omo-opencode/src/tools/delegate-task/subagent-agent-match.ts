@@ -54,11 +54,10 @@ export async function resolveSubagentAgentMatch(
   const appAgentsFn = (executorCtx.client as unknown as { app?: { agents?: unknown } })?.app?.agents
   let agentsResult: unknown = []
   if (typeof appAgentsFn === "function") {
-    try {
-      agentsResult = await (appAgentsFn as () => Promise<unknown>).call((executorCtx.client as unknown as { app: unknown }).app)
-    } catch {
-      agentsResult = []
-    }
+    // A client without app.agents (V2 hosts) falls back to the builtin list, but a
+    // call that actually throws must surface: swallowing it would silently
+    // resolve the request against the fallback list and hide a broken discovery API.
+    agentsResult = await (appAgentsFn as () => Promise<unknown>).call((executorCtx.client as unknown as { app: unknown }).app)
   }
   const agents = normalizeSDKResponse(agentsResult, [] as AgentInfo[], {
     preferResponseOnMissingData: true,
