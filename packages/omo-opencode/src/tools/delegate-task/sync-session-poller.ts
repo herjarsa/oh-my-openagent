@@ -14,10 +14,12 @@ const MAX_NON_ACTIVE_STATUS_STALENESS_POLLS = 10
 const MAX_IDLE_NO_PROGRESS_POLLS = 60
 
 function wait(milliseconds: number): Promise<void> {
-  const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-  const typedArray = new Int32Array(sharedBuffer)
-  const result = Atomics.waitAsync(typedArray, 0, 0, milliseconds)
-  return result.async ? result.value.then(() => undefined) : Promise.resolve()
+  // Atomics.waitAsync never settles on Bun 1.3.x for Windows (returns async:true
+  // with a promise that never resolves), which hung the poll loop forever and
+  // defeated every poll bound. setTimeout always fires, so the bounds hold.
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(milliseconds, 0))
+  })
 }
 
 function abortSyncSession(client: OpencodeClient, sessionID: string, reason: string): void {
@@ -33,6 +35,12 @@ function isActiveSessionStatus(status: { type: string } | undefined): boolean {
   return status !== undefined && ACTIVE_SESSION_STATUSES.has(status.type)
 }
 
+function totalMessageTextLength(messages: SessionMessage[]): number {
+  return messages.reduce(
+    (sum, m) => sum + (m.parts ?? []).reduce((partSum, p) => partSum + (p.text?.length ?? 0), 0),
+    0,
+  )
+}
 function hasMessagesAfterAnchor(
   messages: SessionMessage[],
   anchorMessageID: string | undefined,
@@ -88,8 +96,14 @@ export async function pollSyncSession(
   let lastSeenAssistantId: string | undefined
   let lastObservedAssistantId: string | undefined
   let lastObservedMessageCount: number | undefined
+  let lastTextLength: number | undefined
   const childSettleMs = input.childWakeGraceMs ?? CHILD_WAKE_GRACE_MS
   let childWaitAssistantId: string | undefined
+  // Set when a continuation was owed earlier in the same poll iteration. The
+  // live check below can flip back to false before the completion branch runs, so
+  // without this the poller would hand back the pre-results turn instead of
+  // honoring the child wake grace.
+  let continuationOwedThisPoll = false
   let childSettleStartedAt = 0
   // A sync subagent can end its turn and then be re-woken by a parent-wake
   // notification once its background children finish. The task is only truly done
@@ -107,6 +121,11 @@ export async function pollSyncSession(
       (input.hasActiveChildBackgroundTasks?.(input.sessionID) ?? false) ||
       (input.hasPendingParentWake?.(input.sessionID) ?? false)
     if (continuationOwed) {
+      childWaitAssistantId = currentAssistantId
+      childSettleStartedAt = 0
+      return true
+    }
+    if (continuationOwedThisPoll) {
       childWaitAssistantId = currentAssistantId
       childSettleStartedAt = 0
       return true
@@ -203,6 +222,7 @@ export async function pollSyncSession(
     const continuationOwed =
       (input.hasActiveChildBackgroundTasks?.(input.sessionID) ?? false) ||
       (input.hasPendingParentWake?.(input.sessionID) ?? false)
+    continuationOwedThisPoll = continuationOwed
     if (isActive || statusChanged || continuationOwed) {
       idleNoProgressPolls = 0
     } else {
@@ -252,8 +272,19 @@ export async function pollSyncSession(
       (messages.length !== lastObservedMessageCount || currentAssistantId !== lastObservedAssistantId)
     lastObservedMessageCount = messages.length
     lastObservedAssistantId = currentAssistantId
+    // Text growth counts as progress too: a slowly streaming answer keeps the
+    // same message ids while its content grows. Without this, the no-progress
+    // counter would fire on a live stream and abort a healthy turn.
+    const currentTextLength = totalMessageTextLength(messages)
+    const textLengthChanged = lastTextLength !== undefined && currentTextLength !== lastTextLength
+    lastTextLength = currentTextLength
     if (messageStateChanged) {
       inactiveStart = Date.now()
+      idleNoProgressPolls = 0
+    } else if (textLengthChanged) {
+      // Stream growth suppresses only the fail-fast counter, never the outer
+      // inactivity bound: a stream that grows forever without completing must
+      // still hit the poll timeout instead of spinning indefinitely.
       idleNoProgressPolls = 0
     }
 

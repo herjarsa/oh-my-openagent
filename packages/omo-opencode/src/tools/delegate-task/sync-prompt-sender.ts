@@ -1,5 +1,5 @@
 import type { SisyphusAgentConfig } from "../../config/schema"
-import { stripInvisibleAgentCharacters } from "../../shared/agent-display-names"
+import { normalizeAgentForPromptKey, stripInvisibleAgentCharacters } from "../../shared/agent-display-names"
 import { getAgentToolRestrictions } from "../../shared/agent-tool-restrictions"
 import { createInternalAgentTextPart } from "../../shared/internal-initiator-marker"
 import {
@@ -103,7 +103,7 @@ export async function sendSyncPrompt(
   const promptArgs = {
     path: { id: input.sessionID },
     body: {
-      agent: stripInvisibleAgentCharacters(input.agentToUse),
+      agent: normalizeAgentForPromptKey(input.agentToUse) ?? stripInvisibleAgentCharacters(input.agentToUse),
       system: input.systemContent,
       tools,
       parts: [createInternalAgentTextPart(effectivePrompt)],
