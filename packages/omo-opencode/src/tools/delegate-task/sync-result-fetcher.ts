@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "./types"
 import type { SessionMessage } from "./executor-types"
 import { normalizeSDKResponse } from "../../shared"
+import { stripGoalKeyword } from "./child-goal"
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -122,11 +123,11 @@ export async function fetchSyncResult(
     if (options.deliverableTag) {
       const tagged = extractTaggedDeliverable(assistantMessages, options.deliverableTag)
       if (tagged) {
-        return { ok: true, textContent: tagged }
+        return { ok: true, textContent: stripGoalKeyword(tagged) }
       }
     }
 
-    return { ok: true, textContent: lastContent }
+    return { ok: true, textContent: stripGoalKeyword(lastContent) }
   }
 
   // Prefer an explicit deliverable envelope (e.g. `<plan>...</plan>`) when the
@@ -137,7 +138,7 @@ export async function fetchSyncResult(
   if (options?.deliverableTag) {
     const tagged = extractTaggedDeliverable(assistantMessages, options.deliverableTag)
     if (tagged) {
-      return { ok: true, textContent: tagged }
+      return { ok: true, textContent: stripGoalKeyword(tagged) }
     }
   }
 
@@ -160,5 +161,5 @@ export async function fetchSyncResult(
     }
   }
 
-  return { ok: true, textContent }
+  return { ok: true, textContent: stripGoalKeyword(textContent) }
 }
