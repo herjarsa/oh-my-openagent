@@ -52,15 +52,19 @@ describe("resolveSkillContent — nativeSkills integration", () => {
 
   it("#given a skill that lives only in nativeSkills #when resolved #then returns its content", async () => {
     // given
+    // Namespaced probe name: user-global skill dirs (~/.agents, ~/.cursor,
+    // ~/.gemini) are scanned by discoverSkills, so a generic name like
+    // "test-driven-development" resolves to the real installed skill instead of
+    // exercising the native-only fallback path this test is about.
     const native = makeNativeSkill(
-      "test-driven-development",
-      "TDD discipline",
-      "## Red-Green-Refactor\nWrite a failing test first.",
+      "omo-native-only-probe",
+      "Native only probe",
+      "## Probe Body\nWrite a failing test first.",
     )
     const nativeSkills = makeNativeAccessor([native])
 
     // when
-    const result = await resolveSkillContent(["test-driven-development"], {
+    const result = await resolveSkillContent(["omo-native-only-probe"], {
       nativeSkills,
       directory: TEST_DIR,
     })
@@ -68,7 +72,7 @@ describe("resolveSkillContent — nativeSkills integration", () => {
     // then
     expect(result.error).toBeNull()
     expect(result.contents).toHaveLength(1)
-    expect(result.content).toContain("Red-Green-Refactor")
+    expect(result.content).toContain("Probe Body")
     expect(result.content).toContain("Write a failing test first")
   })
 
@@ -254,15 +258,17 @@ describe("resolveSkillContent — nativeSkills integration", () => {
 
   it("#given a namespaced OMO skill #when requested by unique short name with different case #then resolves it", async () => {
     // given
-    const skillsDir = join(TEST_DIR, ".opencode", "skills", "toolkit", "systematic-debugging")
+    // Same collision hazard as above: "systematic-debugging" exists in the
+    // user-global skill dirs, so a short name probe has to use a unique slug.
+    const skillsDir = join(TEST_DIR, ".opencode", "skills", "toolkit", "omo-namespaced-probe")
     mkdirSync(skillsDir, { recursive: true })
     writeFileSync(
       join(skillsDir, "SKILL.md"),
-      "---\nname: toolkit/systematic-debugging\ndescription: Systematic debugging\n---\nSHORT_NAME_BODY",
+      "---\nname: toolkit/omo-namespaced-probe\ndescription: Namespaced probe\n---\nSHORT_NAME_BODY",
     )
 
     // when
-    const result = await resolveSkillContent(["SYSTEMATIC-DEBUGGING"], {
+    const result = await resolveSkillContent(["OMO-NAMESPACED-PROBE"], {
       directory: TEST_DIR,
     })
 
