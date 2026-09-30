@@ -134593,16 +134593,68 @@ function getTerminalSessionError(messages) {
 // packages/omo-opencode/src/tools/delegate-task/sync-session-poller.ts
 init_logger2();
 init_shared();
+
+// packages/omo-opencode/src/tools/delegate-task/child-goal.ts
+var CHILD_DONE_KEYWORD = "[TASK_DONE]";
+var STALL_ERROR_PREFIX = "Task stalled:";
+var MAX_CHILD_GOAL_RESUMES = 2;
+var CHILD_GOAL_APPEND = `
+
+When your task is fully complete, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
+function buildGoalSupervisedPrompt(prompt, agentName, tddEnabled) {
+  return `${buildTaskPrompt(prompt, agentName, tddEnabled)}${CHILD_GOAL_APPEND}`;
+}
+function assistantTextOf(msg) {
+  return (msg.parts ?? []).filter((p) => p.type === "text" || p.type === "reasoning").map((p) => p.text ?? "").filter((text) => text.length > 0).join(`
+`);
+}
+function hasGoalKeywordInLatest(messages, anchorMessageID, anchorMessageCount) {
+  let scoped;
+  if (anchorMessageID !== undefined) {
+    const anchorIndex = messages.findIndex((message) => message.info?.id === anchorMessageID);
+    scoped = anchorIndex === -1 ? messages : messages.slice(anchorIndex + 1);
+  } else if (anchorMessageCount !== undefined) {
+    scoped = messages.slice(anchorMessageCount);
+  } else {
+    scoped = messages;
+  }
+  for (let i = scoped.length - 1;i >= 0; i--) {
+    const msg = scoped[i];
+    if (msg?.info?.role !== "assistant")
+      continue;
+    const text = assistantTextOf(msg);
+    if (!text)
+      continue;
+    return text.includes(CHILD_DONE_KEYWORD);
+  }
+  return false;
+}
+function stripGoalKeyword(text) {
+  if (!text.includes(CHILD_DONE_KEYWORD))
+    return text;
+  return text.split(`
+`).filter((line) => !line.includes(CHILD_DONE_KEYWORD)).join(`
+`).trim();
+}
+function isStallPollError(pollError) {
+  return pollError.startsWith(STALL_ERROR_PREFIX);
+}
+function shouldAutoResumeChild(pollError, resumesUsed) {
+  return resumesUsed < MAX_CHILD_GOAL_RESUMES && isStallPollError(pollError);
+}
+function buildChildResumeNudge(args) {
+  return `Continue working on the task described as "${args.description}". If you already finished, reply now with your final answer. When fully done, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
+}
+
+// packages/omo-opencode/src/tools/delegate-task/sync-session-poller.ts
 var ACTIVE_SESSION_STATUSES2 = new Set(["busy", "retry", "running"]);
 var CHILD_WAKE_GRACE_MS = 5000;
 var MAX_NON_ACTIVE_STATUS_STALENESS_POLLS = 10;
+var MAX_IDLE_NO_PROGRESS_POLLS = 60;
 function wait(milliseconds) {
-  const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-  const typedArray = new Int32Array(sharedBuffer);
-  const result = Atomics.waitAsync(typedArray, 0, 0, milliseconds);
-  return result.async ? result.value.then(() => {
-    return;
-  }) : Promise.resolve();
+  return new Promise((resolve33) => {
+    setTimeout(resolve33, Math.max(milliseconds, 0));
+  });
 }
 function abortSyncSession(client3, sessionID, reason) {
   log2("[task] Aborting sync session", { sessionID, reason });
@@ -134614,6 +134666,9 @@ function abortSyncSession(client3, sessionID, reason) {
 }
 function isActiveSessionStatus(status) {
   return status !== undefined && ACTIVE_SESSION_STATUSES2.has(status.type);
+}
+function totalMessageTextLength(messages) {
+  return messages.reduce((sum, m) => sum + (m.parts ?? []).reduce((partSum, p) => partSum + (p.text?.length ?? 0), 0), 0);
 }
 function hasMessagesAfterAnchor(messages, anchorMessageID, anchorMessageCount) {
   if (anchorMessageID !== undefined) {
@@ -134635,6 +134690,7 @@ async function pollSyncSession(ctx, client3, input, timeoutMs) {
   const pollStart = Date.now();
   let inactiveStart = pollStart;
   let pollCount = 0;
+  let idleNoProgressPolls = 0;
   let nonActivePollsSinceMessageFetch = 0;
   let lastStatusRevision;
   let hasFetchedNonActiveMessages = false;
@@ -134643,12 +134699,19 @@ async function pollSyncSession(ctx, client3, input, timeoutMs) {
   let lastSeenAssistantId;
   let lastObservedAssistantId;
   let lastObservedMessageCount;
+  let lastTextLength;
   const childSettleMs = input.childWakeGraceMs ?? CHILD_WAKE_GRACE_MS;
   let childWaitAssistantId;
+  let continuationOwedThisPoll = false;
   let childSettleStartedAt = 0;
   const isAwaitingChildContinuation = (currentAssistantId) => {
     const continuationOwed = (input.hasActiveChildBackgroundTasks?.(input.sessionID) ?? false) || (input.hasPendingParentWake?.(input.sessionID) ?? false);
     if (continuationOwed) {
+      childWaitAssistantId = currentAssistantId;
+      childSettleStartedAt = 0;
+      return true;
+    }
+    if (continuationOwedThisPoll) {
       childWaitAssistantId = currentAssistantId;
       childSettleStartedAt = 0;
       return true;
@@ -134726,6 +134789,20 @@ Session ID: ${input.sessionID}`;
     const statusChanged = statusRevision !== undefined && String(statusRevision) !== lastStatusRevision;
     if (statusChanged)
       inactiveStart = Date.now();
+    const continuationOwed = (input.hasActiveChildBackgroundTasks?.(input.sessionID) ?? false) || (input.hasPendingParentWake?.(input.sessionID) ?? false);
+    continuationOwedThisPoll = continuationOwed;
+    if (isActive || statusChanged || continuationOwed) {
+      idleNoProgressPolls = 0;
+    } else {
+      idleNoProgressPolls++;
+      if (idleNoProgressPolls >= MAX_IDLE_NO_PROGRESS_POLLS) {
+        log2("[task] Poll no-progress timeout reached", { sessionID: input.sessionID, pollCount });
+        abortSyncSession(client3, input.sessionID, "no_progress");
+        if (input.toastManager && input.taskId)
+          input.toastManager.removeTask(input.taskId);
+        return `${STALL_ERROR_PREFIX} subagent session ${input.sessionID} was idle for ${idleNoProgressPolls} polls with no new messages. The child likely failed (provider quota or unavailable model) without producing a response. Session ID: ${input.sessionID}`;
+      }
+    }
     nonActivePollsSinceMessageFetch++;
     if (hasFetchedNonActiveMessages && !statusChanged && nonActivePollsSinceMessageFetch < MAX_NON_ACTIVE_STATUS_STALENESS_POLLS) {
       continue;
@@ -134743,12 +134820,23 @@ Session ID: ${input.sessionID}`;
     }
     if (!hasMessagesAfterAnchor(messages, input.anchorMessageID, input.anchorMessageCount))
       continue;
+    if (hasGoalKeywordInLatest(messages, input.anchorMessageID, input.anchorMessageCount)) {
+      log2("[task] Poll complete - goal keyword detected", { sessionID: input.sessionID, pollCount });
+      break;
+    }
     const currentAssistantId = [...messages].reverse().find((m) => m.info?.role === "assistant")?.info?.id;
     const messageStateChanged = lastObservedMessageCount !== undefined && (messages.length !== lastObservedMessageCount || currentAssistantId !== lastObservedAssistantId);
     lastObservedMessageCount = messages.length;
     lastObservedAssistantId = currentAssistantId;
-    if (messageStateChanged)
+    const currentTextLength = totalMessageTextLength(messages);
+    const textLengthChanged = lastTextLength !== undefined && currentTextLength !== lastTextLength;
+    lastTextLength = currentTextLength;
+    if (messageStateChanged) {
       inactiveStart = Date.now();
+      idleNoProgressPolls = 0;
+    } else if (textLengthChanged) {
+      idleNoProgressPolls = 0;
+    }
     const sessionError = getTerminalSessionError(messages);
     if (sessionError) {
       log2("[task] Poll detected terminal session error", { sessionID: input.sessionID, sessionError });
@@ -134892,15 +134980,15 @@ Session ID: ${sessionID}`
     if (options.deliverableTag) {
       const tagged = extractTaggedDeliverable(assistantMessages, options.deliverableTag);
       if (tagged) {
-        return { ok: true, textContent: tagged };
+        return { ok: true, textContent: stripGoalKeyword(tagged) };
       }
     }
-    return { ok: true, textContent: lastContent };
+    return { ok: true, textContent: stripGoalKeyword(lastContent) };
   }
   if (options?.deliverableTag) {
     const tagged = extractTaggedDeliverable(assistantMessages, options.deliverableTag);
     if (tagged) {
-      return { ok: true, textContent: tagged };
+      return { ok: true, textContent: stripGoalKeyword(tagged) };
     }
   }
   let textContent = "";
@@ -134921,7 +135009,7 @@ Session ID: ${sessionID}`
 Session ID: ${sessionID}`
     };
   }
-  return { ok: true, textContent };
+  return { ok: true, textContent: stripGoalKeyword(textContent) };
 }
 
 // packages/omo-opencode/src/tools/delegate-task/sync-continuation-deps.ts
@@ -134932,6 +135020,7 @@ var syncContinuationDeps = {
 
 // packages/omo-opencode/src/tools/delegate-task/sync-continuation.ts
 init_session_tools_store();
+init_agent_display_names();
 init_logger2();
 
 // packages/omo-opencode/src/features/background-agent/constants.ts
@@ -135055,6 +135144,8 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
   let anchorMessageCount;
   let anchorMessageID;
   let handedBackToParent = false;
+  let allowTask = false;
+  let tools = { task: false, call_omo_agent: true, question: false };
   try {
     const resumeContext = await resolveResumeContext(client3, continuationID);
     resumeAgent = resumeContext.resumeAgent;
@@ -135062,6 +135153,9 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
     resumeVariant = resumeContext.resumeVariant;
     anchorMessageCount = resumeContext.anchorMessageCount;
     anchorMessageID = resumeContext.anchorMessageID;
+    resumeAgent = normalizeAgentForPromptKey(resumeAgent) ?? resumeAgent;
+    allowTask = isPlanFamily(resumeAgent);
+    tools = { task: allowTask, call_omo_agent: true, question: false, ...resumeAgent ? getAgentToolRestrictions(resumeAgent) : {} };
     const resumeModelForMetadata = resumeModel && resumeVariant !== undefined ? { ...resumeModel, variant: resumeVariant } : resumeModel;
     const syncContMeta = {
       title: args.description,
@@ -135081,15 +135175,8 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
       }
     };
     await publishToolMetadata(ctx, syncContMeta);
-    const allowTask = isPlanFamily(resumeAgent);
     const tddEnabled = sisyphusAgentConfig?.tdd;
-    const effectivePrompt = buildTaskPrompt(args.prompt, resumeAgent, tddEnabled);
-    const tools = {
-      task: allowTask,
-      call_omo_agent: true,
-      question: false,
-      ...resumeAgent ? getAgentToolRestrictions(resumeAgent) : {}
-    };
+    const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, resumeAgent, tddEnabled);
     setSessionTools(continuationID, tools);
     await promptWithModelSuggestionRetry(client3, {
       path: { id: continuationID },
@@ -135116,33 +135203,83 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
 
 Task ID: ${continuationID}`;
   }
-  try {
-    const pollError = await deps.pollSyncSession(ctx, client3, {
-      sessionID: continuationID,
-      agentToUse: resumeAgent ?? "continue",
-      toastManager,
-      taskId,
-      anchorMessageCount,
-      anchorMessageID
-    }, syncPollTimeoutMs);
-    if (pollError && shouldAttemptPollErrorRecovery(pollError)) {
-      if (anchorMessageCount === undefined) {
-        return pollError;
-      }
-      const recoveredResult = await deps.fetchSyncResult(client3, continuationID, anchorMessageCount, {
-        strictAbortRecovery: true,
-        deliverableTag: getDeliverableTag(resumeAgent)
-      });
-      if (!recoveredResult.ok) {
-        return pollError;
-      }
-      const duration2 = formatDuration2(startTime);
-      handedBackToParent = true;
-      return `Task continued and completed in ${duration2}.
+  let goalResumesUsed = 0;
+  while (true) {
+    try {
+      const pollError = await deps.pollSyncSession(ctx, client3, {
+        sessionID: continuationID,
+        agentToUse: resumeAgent ?? "continue",
+        toastManager,
+        taskId,
+        anchorMessageCount,
+        anchorMessageID
+      }, syncPollTimeoutMs);
+      if (pollError && shouldAttemptPollErrorRecovery(pollError)) {
+        if (anchorMessageCount === undefined) {
+          return pollError;
+        }
+        const recoveredResult = await deps.fetchSyncResult(client3, continuationID, anchorMessageCount, {
+          strictAbortRecovery: true,
+          deliverableTag: getDeliverableTag(resumeAgent)
+        });
+        if (!recoveredResult.ok) {
+          return pollError;
+        }
+        const duration2 = formatDuration2(startTime);
+        handedBackToParent = true;
+        return `Task continued and completed in ${duration2}.
 
 ---
 
 ${recoveredResult.textContent || "(No text output)"}
+
+${buildTaskMetadataBlock({
+          sessionId: continuationID,
+          taskId: continuationID,
+          agent: resumeAgent,
+          category: args.category
+        })}`;
+      } else if (pollError && shouldAutoResumeChild(pollError, goalResumesUsed)) {
+        goalResumesUsed++;
+        log2("[task] Auto-resuming stalled continuation session", { sessionID: continuationID, resume: goalResumesUsed });
+        try {
+          await promptWithModelSuggestionRetry(client3, {
+            path: { id: continuationID },
+            body: {
+              ...resumeAgent !== undefined ? { agent: resumeAgent } : {},
+              ...resumeModel !== undefined ? { model: resumeModel } : {},
+              ...resumeVariant !== undefined ? { variant: resumeVariant } : {},
+              system: systemContent,
+              tools,
+              parts: [{ type: "text", text: buildChildResumeNudge(args) }]
+            }
+          }, {
+            queueBehavior: "defer",
+            checkToolState: false
+          });
+        } catch (resumeError) {
+          const resumeMessage = resumeError instanceof Error ? resumeError.message : String(resumeError);
+          return `Failed to send resume prompt: ${resumeMessage}
+
+Task ID: ${continuationID}`;
+        }
+        continue;
+      } else if (pollError) {
+        return pollError;
+      }
+      const result = await deps.fetchSyncResult(client3, continuationID, anchorMessageCount, {
+        deliverableTag: getDeliverableTag(resumeAgent)
+      });
+      if (!result.ok) {
+        return result.error;
+      }
+      const duration = formatDuration2(startTime);
+      handedBackToParent = true;
+      return `Task continued and completed in ${duration}.
+
+---
+
+${result.textContent || "(No text output)"}
 
 ${buildTaskMetadataBlock({
         sessionId: continuationID,
@@ -135150,43 +135287,21 @@ ${buildTaskMetadataBlock({
         agent: resumeAgent,
         category: args.category
       })}`;
-    } else if (pollError) {
-      return pollError;
-    }
-    const result = await deps.fetchSyncResult(client3, continuationID, anchorMessageCount, {
-      deliverableTag: getDeliverableTag(resumeAgent)
-    });
-    if (!result.ok) {
-      return result.error;
-    }
-    const duration = formatDuration2(startTime);
-    handedBackToParent = true;
-    return `Task continued and completed in ${duration}.
-
----
-
-${result.textContent || "(No text output)"}
-
-${buildTaskMetadataBlock({
-      sessionId: continuationID,
-      taskId: continuationID,
-      agent: resumeAgent,
-      category: args.category
-    })}`;
-  } finally {
-    if (toastManager) {
-      toastManager.removeTask(taskId);
-    }
-    if (handedBackToParent) {
-      handedBackSyncSessions.add(continuationID);
-      if (typeof client3.session.abort === "function") {
-        client3.session.abort({ path: { id: continuationID } }).catch((error) => {
-          log2(`[task] Failed to abort completed sync continuation session:`, error);
-        });
+    } finally {
+      if (toastManager) {
+        toastManager.removeTask(taskId);
       }
+      if (handedBackToParent) {
+        handedBackSyncSessions.add(continuationID);
+        if (typeof client3.session.abort === "function") {
+          client3.session.abort({ path: { id: continuationID } }).catch((error) => {
+            log2(`[task] Failed to abort completed sync continuation session:`, error);
+          });
+        }
+      }
+      detachFromManager?.();
+      scheduleSyncSessionDeletion(client3, continuationID);
     }
-    detachFromManager?.();
-    scheduleSyncSessionDeletion(client3, continuationID);
   }
 }
 // packages/omo-opencode/src/tools/delegate-task/cancel-unstable-agent-task.ts
@@ -135506,7 +135621,7 @@ async function executeBackgroundTask(args, ctx, executorCtx, parentContext, agen
   try {
     const tddEnabled = executorCtx.sisyphusAgentConfig?.tdd;
     const normalizedAgent = stripAgentListSortPrefix(agentToUse);
-    const effectivePrompt = buildTaskPrompt(args.prompt, normalizedAgent, tddEnabled);
+    const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, normalizedAgent, tddEnabled);
     const persistedDescription = getPersistedBackgroundTaskDescription(args, normalizedAgent);
     const task = await manager.launch({
       description: persistedDescription,
@@ -135638,6 +135753,79 @@ async function reserveSyncSubagentSpawn(executorCtx, parentContext) {
 init_src2();
 
 // packages/omo-opencode/src/tools/delegate-task/sync-session-creator.ts
+init_logger2();
+var ID_KEYS = ["id", "sessionID", "sessionId"];
+var WRAPPER_KEYS = ["session", "info", "response", "result"];
+function getStringId(value) {
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  const record13 = value;
+  for (const key of ID_KEYS) {
+    const candidate2 = record13[key];
+    if (typeof candidate2 === "string" && candidate2.length > 0) {
+      return candidate2;
+    }
+  }
+  return;
+}
+function getNestedId(container) {
+  if (typeof container !== "object" || container === null) {
+    return;
+  }
+  const record13 = container;
+  for (const key of WRAPPER_KEYS) {
+    const nested = getStringId(record13[key]);
+    if (nested !== undefined) {
+      return nested;
+    }
+  }
+  return;
+}
+function extractSessionId(raw) {
+  if (typeof raw === "string") {
+    return raw.length > 0 ? raw : undefined;
+  }
+  if (typeof raw !== "object" || raw === null) {
+    return;
+  }
+  const direct = getStringId(raw) ?? getNestedId(raw);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const data = raw.data;
+  if (typeof data === "string") {
+    return data.length > 0 ? data : undefined;
+  }
+  const fromData = getStringId(data) ?? getNestedId(data);
+  if (fromData !== undefined) {
+    return fromData;
+  }
+  if (typeof data === "object" && data !== null) {
+    const dataRecord = data;
+    for (const key of WRAPPER_KEYS) {
+      const deep = getNestedId(dataRecord[key]);
+      if (deep !== undefined) {
+        return deep;
+      }
+    }
+  }
+  return;
+}
+function fingerprintShape(raw) {
+  const top = typeof raw === "object" && raw !== null ? raw : undefined;
+  const keys = top ? Object.keys(top) : [];
+  const data = top?.data;
+  const dataType = data === null ? "null" : typeof data;
+  const dataKeys = typeof data === "object" && data !== null ? Object.keys(data) : [];
+  let preview;
+  try {
+    preview = JSON.stringify(raw)?.slice(0, 500) ?? String(raw).slice(0, 500);
+  } catch {
+    preview = String(raw).slice(0, 500);
+  }
+  return { keys, dataType, dataKeys, preview };
+}
 async function createSyncSession(client3, input) {
   const parentSession = await client3.session.get({ path: { id: input.parentSessionID } }).catch(() => null);
   const parentDirectory = parentSession?.data?.directory ?? input.defaultDirectory;
@@ -135658,13 +135846,17 @@ async function createSyncSession(client3, input) {
       directory: parentDirectory
     }
   });
-  if (createResult.error !== undefined) {
+  if (createResult.error) {
     return { ok: false, error: `Failed to create session: ${createResult.error}` };
   }
-  const raw = createResult;
-  const extractedID = (typeof raw.data?.id === "string" ? raw.data.id : undefined) ?? (typeof raw.data?.sessionID === "string" ? raw.data.sessionID : undefined) ?? (typeof raw.data?.sessionId === "string" ? raw.data.sessionId : undefined) ?? (typeof raw.data?.session?.id === "string" ? raw.data.session.id : undefined) ?? (typeof raw.id === "string" ? raw.id : undefined) ?? (typeof raw.sessionID === "string" ? raw.sessionID : undefined) ?? (typeof raw.sessionId === "string" ? raw.sessionId : undefined);
+  const extractedID = extractSessionId(createResult);
   if (typeof extractedID !== "string" || extractedID.length === 0) {
-    return { ok: false, error: "Failed to create session: missing session ID (unsupported V1/V2 response shape)" };
+    const fingerprint = fingerprintShape(createResult);
+    log2("[delegate-task] session.create returned unsupported shape", fingerprint);
+    return {
+      ok: false,
+      error: `Failed to create session: missing session ID (keys=[${fingerprint.keys.join(",")}] dataKeys=[${fingerprint.dataKeys.join(",")}] preview=${fingerprint.preview})`
+    };
   }
   return { ok: true, sessionID: extractedID, parentDirectory };
 }
@@ -135721,7 +135913,7 @@ function buildSyncPromptTools2(agentToUse, permission) {
 }
 async function sendSyncPrompt(client3, input, deps = sendSyncPromptDeps) {
   const tddEnabled = input.sisyphusAgentConfig?.tdd;
-  const effectivePrompt = buildTaskPrompt(input.args.prompt, input.agentToUse, tddEnabled);
+  const effectivePrompt = buildGoalSupervisedPrompt(input.args.prompt, input.agentToUse, tddEnabled);
   const userPermission = input.categoryModel?.tools ? migrateToolsToPermission(input.categoryModel.tools) : undefined;
   const tools = buildSyncPromptTools2(input.agentToUse, userPermission);
   setSessionTools(input.sessionID, tools);
@@ -135731,7 +135923,7 @@ async function sendSyncPrompt(client3, input, deps = sendSyncPromptDeps) {
   const promptArgs = {
     path: { id: input.sessionID },
     body: {
-      agent: stripInvisibleAgentCharacters(input.agentToUse),
+      agent: normalizeAgentForPromptKey(input.agentToUse) ?? stripInvisibleAgentCharacters(input.agentToUse),
       system: input.systemContent,
       tools,
       parts: [createInternalAgentTextPart(effectivePrompt)],
@@ -135811,6 +136003,7 @@ async function publishSyncTaskMetadata(input) {
 }
 
 // packages/omo-opencode/src/tools/delegate-task/sync-task-runner.ts
+init_logger2();
 init_constants2();
 
 // packages/omo-opencode/src/tools/delegate-task/sync-completion-message.ts
@@ -136013,11 +136206,13 @@ async function runSyncTaskLoop(input) {
     pending: true
   } : undefined;
   let activeSessionID = input.sessionID;
+  let currentArgs = args;
+  let goalResumesUsed = 0;
   while (true) {
     let promptError = await deps.sendSyncPrompt(client3, {
       sessionID: activeSessionID,
       agentToUse,
-      args,
+      args: currentArgs,
       systemContent,
       directory,
       toastManager,
@@ -136035,7 +136230,7 @@ async function runSyncTaskLoop(input) {
           return deps.sendSyncPrompt(client3, {
             sessionID: activeSessionID,
             agentToUse,
-            args,
+            args: currentArgs,
             systemContent,
             directory,
             toastManager,
@@ -136061,6 +136256,12 @@ async function runSyncTaskLoop(input) {
       hasPendingParentWake
     }, syncPollTimeoutMs);
     if (pollError) {
+      if (shouldAutoResumeChild(pollError, goalResumesUsed)) {
+        goalResumesUsed++;
+        log2("[task] Auto-resuming stalled child session", { sessionID: activeSessionID, agentToUse, resume: goalResumesUsed });
+        currentArgs = { ...args, prompt: buildChildResumeNudge(args) };
+        continue;
+      }
       if (shouldAttemptPollErrorRecovery2(pollError)) {
         const recoveredResult = await deps.fetchSyncResult(client3, activeSessionID, undefined, {
           strictAbortRecovery: true,
@@ -189129,6 +189330,7 @@ function buildV1Input(ctx, client5) {
 }
 
 // packages/omo-opencode/src/plugin-v2/v1-client.ts
+init_shared();
 import * as fs25 from "fs";
 var SPIKE_LOG4 = portLogPath();
 function spikeLog4(event, data = {}) {
@@ -189145,9 +189347,124 @@ function degradedLog(method) {
     spikeLog4("v1_client_degraded", { method, count });
   }
 }
+function asRecord5(value) {
+  return value !== null && typeof value === "object" ? value : null;
+}
+function stringField2(record15, key) {
+  const candidate2 = record15[key];
+  return typeof candidate2 === "string" && candidate2.length > 0 ? candidate2 : undefined;
+}
+function unwrapSessionInfo(value) {
+  const candidates = [value];
+  const top = asRecord5(value);
+  if (top !== null) {
+    for (const key of ["data", "session", "info"])
+      candidates.push(top[key]);
+  }
+  for (const candidate2 of candidates) {
+    const record15 = asRecord5(candidate2);
+    if (record15 === null)
+      continue;
+    const id = stringField2(record15, "id");
+    if (id === undefined)
+      continue;
+    const location = asRecord5(record15["location"]);
+    const directory = (location !== null ? stringField2(location, "directory") : undefined) ?? stringField2(record15, "directory") ?? "";
+    return { id, directory, raw: record15 };
+  }
+  return null;
+}
+function shapeFingerprint(value) {
+  const top = asRecord5(value);
+  let preview;
+  try {
+    preview = JSON.stringify(value)?.slice(0, 200) ?? String(value).slice(0, 200);
+  } catch {
+    preview = String(value).slice(0, 200);
+  }
+  return { keys: top ? Object.keys(top) : [], preview };
+}
 function v2Session(ctx) {
   const session = ctx.session;
   return session !== null && typeof session === "object" ? session : {};
+}
+function v2Event(ctx) {
+  const event = ctx.event;
+  return event !== null && typeof event === "object" ? event : {};
+}
+function agentOf(input) {
+  const body = asRecord5(asRecord5(input)?.["body"]);
+  if (body === null)
+    return;
+  return stringField2(body, "agent");
+}
+function modelOf(input) {
+  const body = asRecord5(asRecord5(input)?.["body"]);
+  if (body === null)
+    return;
+  const model = asRecord5(body["model"]);
+  if (model === null)
+    return;
+  const providerID = stringField2(model, "providerID");
+  const id = stringField2(model, "modelID") ?? stringField2(model, "id");
+  if (providerID === undefined || id === undefined)
+    return;
+  const variant = stringField2(model, "variant");
+  return variant === undefined ? { id, providerID } : { id, providerID, variant };
+}
+function applyStatusEvent(table, event) {
+  const rec = asRecord5(event);
+  if (rec === null)
+    return;
+  const type = stringField2(rec, "type");
+  const data = asRecord5(rec["data"]);
+  if (type === undefined || data === null)
+    return;
+  const sessionID = stringField2(data, "sessionID");
+  if (sessionID === undefined)
+    return;
+  if (type === "session.status") {
+    const status = asRecord5(data["status"]);
+    const statusType = status !== null ? stringField2(status, "type") : undefined;
+    if (statusType !== undefined)
+      table.set(sessionID, { ...status, type: statusType });
+    return;
+  }
+  if (type === "session.idle") {
+    table.set(sessionID, { type: "idle" });
+    return;
+  }
+  if (type === "session.execution.started") {
+    table.set(sessionID, { type: "busy" });
+    return;
+  }
+  if (type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
+    table.set(sessionID, { type: "idle" });
+    return;
+  }
+  if (type === "session.deleted") {
+    table.delete(sessionID);
+  }
+}
+function startStatusTracking(eventDomain, table) {
+  if (typeof eventDomain.subscribe !== "function") {
+    spikeLog4("v1_client_status_events_unavailable");
+    return;
+  }
+  const subscribe = eventDomain.subscribe.bind(eventDomain);
+  (async () => {
+    try {
+      for await (const event of subscribe()) {
+        applyStatusEvent(table, event);
+      }
+      spikeLog4("v1_client_status_events_ended", { reason: "stream-closed" });
+    } catch (error) {
+      spikeLog4("v1_client_status_events_ended", {
+        reason: "error",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
 }
 function sessionIDOf2(input, fallback = "") {
   if (input !== null && typeof input === "object") {
@@ -189217,29 +189534,64 @@ function messageToView(message, sessionID) {
   if (message === null || typeof message !== "object")
     return { info: { sessionID }, parts: [] };
   const rec = message;
+  const rawType = typeof rec["type"] === "string" ? rec["type"] : undefined;
+  const role = typeof rec["role"] === "string" ? rec["role"] : rawType === "assistant" ? "assistant" : "user";
   const content = rec["content"];
-  const parts = Array.isArray(content) ? content.map(textPartOf2).filter((p) => p !== null) : [];
-  return {
-    info: { sessionID, id: rec["id"], role: rec["role"] ?? "user", ...typeof rec["info"] === "object" ? rec["info"] : {} },
-    parts
+  const parts = Array.isArray(content) ? content.map(textPartOf2).filter((p) => p !== null) : typeof rec["text"] === "string" && rec["text"].length > 0 ? [{ type: "text", text: rec["text"] }] : [];
+  const info = {
+    sessionID,
+    id: rec["id"],
+    role,
+    ...typeof rec["finish"] === "string" ? { finish: rec["finish"] } : {},
+    ...rec["error"] !== undefined && rec["error"] !== null ? { error: rec["error"] } : {},
+    ...typeof rec["info"] === "object" && rec["info"] !== null ? rec["info"] : {}
   };
+  return { info, parts };
 }
 function createV1ClientAdapter(ctx) {
   const session = v2Session(ctx);
+  const statusTable = new Map;
+  startStatusTracking(v2Event(ctx), statusTable);
   const promptLike = (v1input) => {
     const sessionID = sessionIDOf2(v1input);
     const text = textOf(v1input);
-    if (typeof session.prompt !== "function" || sessionID.length === 0) {
+    const promptFn = session.prompt;
+    if (typeof promptFn !== "function" || sessionID.length === 0) {
+      log2("[v1-client] session.prompt delegated", {
+        sessionID: sessionID.length > 0 ? sessionID : "unknown",
+        ok: false,
+        error: "prompt unavailable or missing sessionID"
+      });
       spikeLog4("v1_client_prompt_skipped", { sessionID: sessionID.length > 0 });
       return Promise.resolve(null);
     }
-    return session.prompt({ sessionID, text }).then((res) => {
-      const id = extractMessageId(res);
-      return id ? { data: { info: { id } } } : null;
-    }, (error) => {
-      spikeLog4("v1_client_prompt_failed", { message: error instanceof Error ? error.message : String(error) });
-      return null;
-    });
+    if (text.length === 0) {
+      log2("[v1-client] session.prompt delegated", { sessionID, ok: false, error: "empty prompt text" });
+      spikeLog4("v1_client_prompt_empty", { sessionID });
+      return Promise.resolve(null);
+    }
+    return (async () => {
+      try {
+        const agent = agentOf(v1input);
+        if (agent !== undefined && typeof session.switchAgent === "function") {
+          await session.switchAgent({ sessionID, agent });
+        }
+        const model = modelOf(v1input);
+        if (model !== undefined && typeof session.switchModel === "function") {
+          await session.switchModel({ sessionID, model });
+        }
+        const res = await promptFn({ sessionID, text });
+        const id = extractMessageId(res);
+        log2("[v1-client] session.prompt delegated", { sessionID, ok: true, messageID: id ?? "unknown" });
+        spikeLog4("v1_client_prompt_ok", { sessionID });
+        return id ? { data: { info: { id } } } : null;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log2("[v1-client] session.prompt delegated", { sessionID, ok: false, error: message });
+        spikeLog4("v1_client_prompt_failed", { message });
+        return null;
+      }
+    })();
   };
   const degradedList = (name) => {
     return async () => {
@@ -189253,6 +189605,14 @@ function createV1ClientAdapter(ctx) {
         if (typeof session.get !== "function")
           return { data: null };
         const res = await session.get({ sessionID: sessionIDOf2(v1input) });
+        const record15 = asRecord5(res);
+        if (record15 !== null) {
+          const location = asRecord5(record15["location"]);
+          const directory = location !== null ? stringField2(location, "directory") : undefined;
+          if (directory !== undefined && stringField2(record15, "directory") === undefined) {
+            return { data: { ...record15, directory } };
+          }
+        }
         return { data: res };
       },
       messages: async (v1input) => {
@@ -189266,9 +189626,83 @@ function createV1ClientAdapter(ctx) {
       prompt: promptLike,
       promptAsync: promptLike,
       todo: degradedList("todo"),
-      status: degradedList("status"),
+      status: async () => {
+        const out = {};
+        if (typeof session.active === "function") {
+          try {
+            const res = await session.active();
+            const record15 = asRecord5(res) ?? {};
+            const table = asRecord5(record15["data"]) ?? record15;
+            for (const [id, value] of Object.entries(table)) {
+              const entry = asRecord5(value);
+              const type = entry !== null ? stringField2(entry, "type") : undefined;
+              if (type !== undefined)
+                out[id] = { type };
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            spikeLog4("v1_client_status_failed", { message });
+          }
+        }
+        for (const [id, entry] of statusTable)
+          out[id] = { ...entry };
+        return { data: out };
+      },
+      abort: async (v1input) => {
+        if (typeof session.interrupt !== "function") {
+          spikeLog4("v1_client_abort_unavailable");
+          return { data: undefined, error: "session.interrupt unavailable on V2 host" };
+        }
+        try {
+          await session.interrupt({ sessionID: sessionIDOf2(v1input) });
+          return { data: true };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          spikeLog4("v1_client_abort_failed", { message });
+          return { data: undefined, error: message };
+        }
+      },
       children: degradedList("children"),
-      create: degradedList("create")
+      create: async (v1input) => {
+        if (typeof session.create !== "function") {
+          spikeLog4("v1_client_create_unavailable");
+          return { data: undefined, error: "session.create unavailable on V2 host" };
+        }
+        const outer = asRecord5(v1input) ?? {};
+        const body = asRecord5(outer["body"]) ?? {};
+        const query = asRecord5(outer["query"]) ?? {};
+        const v2input = {};
+        const title = stringField2(body, "title");
+        if (title !== undefined)
+          v2input["title"] = title;
+        const agent = stringField2(body, "agent");
+        if (agent !== undefined)
+          v2input["agent"] = agent;
+        if (asRecord5(body["model"]) !== null)
+          v2input["model"] = body["model"];
+        const directory = stringField2(query, "directory");
+        if (directory !== undefined)
+          v2input["location"] = { directory };
+        const parentID = stringField2(body, "parentID");
+        if (parentID !== undefined)
+          v2input["metadata"] = { parentID };
+        try {
+          const res = await session.create(v2input);
+          const info = unwrapSessionInfo(res);
+          if (info === null) {
+            log2("[v1-client] session.create delegated", { ok: false, ...shapeFingerprint(res) });
+            spikeLog4("v1_client_create_shape", shapeFingerprint(res));
+            return { data: undefined, error: "session.create returned unsupported shape" };
+          }
+          log2("[v1-client] session.create delegated", { ok: true, id: info.id });
+          return { data: { ...info.raw, id: info.id, directory: info.directory.length > 0 ? info.directory : directory ?? "" } };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          log2("[v1-client] session.create delegated", { ok: false, error: message });
+          spikeLog4("v1_client_create_failed", { message });
+          return { data: undefined, error: message };
+        }
+      }
     },
     tui: {
       showToast: async () => {

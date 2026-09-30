@@ -11,7 +11,8 @@ import { resolveMessageContext } from "../../features/hook-message-injector"
 import { formatDuration } from "./time-formatter"
 import { syncContinuationDeps, type SyncContinuationDeps } from "./sync-continuation-deps"
 import { setSessionTools } from "../../shared/session-tools-store"
-import { buildTaskPrompt } from "./prompt-builder"
+import { buildChildResumeNudge, buildGoalSupervisedPrompt, shouldAutoResumeChild } from "./child-goal"
+import { normalizeAgentForPromptKey } from "../../shared/agent-display-names"
 import { buildTaskMetadataBlock } from "../../features/tool-metadata-store/task-metadata-contract"
 import { getTaskID } from "./task-id"
 import { resolveMetadataModel } from "./resolve-metadata-model"
@@ -129,6 +130,9 @@ export async function executeSyncContinuation(
   let anchorMessageID: string | undefined
   let handedBackToParent = false
 
+  let allowTask = false
+  let tools: Record<string, boolean> = { task: false, call_omo_agent: true, question: false }
+
   try {
     const resumeContext = await resolveResumeContext(client, continuationID)
     resumeAgent = resumeContext.resumeAgent
@@ -136,6 +140,12 @@ export async function executeSyncContinuation(
     resumeVariant = resumeContext.resumeVariant
     anchorMessageCount = resumeContext.anchorMessageCount
     anchorMessageID = resumeContext.anchorMessageID
+    // OpenCode resolves prompt agents by config key (case-sensitive). A stored
+    // resumeAgent in display case ("Sisyphus-Junior") would be rejected, so
+    // canonicalize once here to cover every send site below.
+    resumeAgent = normalizeAgentForPromptKey(resumeAgent) ?? resumeAgent
+    allowTask = isPlanFamily(resumeAgent)
+    tools = { task: allowTask, call_omo_agent: true, question: false, ...(resumeAgent ? getAgentToolRestrictions(resumeAgent) : {}) }
 
     const resumeModelForMetadata = resumeModel && resumeVariant !== undefined
       ? { ...resumeModel, variant: resumeVariant }
@@ -159,16 +169,8 @@ export async function executeSyncContinuation(
       },
     }
     await publishToolMetadata(ctx, syncContMeta)
-
-    const allowTask = isPlanFamily(resumeAgent)
     const tddEnabled = sisyphusAgentConfig?.tdd
-    const effectivePrompt = buildTaskPrompt(args.prompt, resumeAgent, tddEnabled)
-    const tools = {
-      task: allowTask,
-      call_omo_agent: true,
-      question: false,
-      ...(resumeAgent ? getAgentToolRestrictions(resumeAgent) : {}),
-    }
+    const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, resumeAgent, tddEnabled)
     setSessionTools(continuationID, tools)
 
     await promptWithModelSuggestionRetry(client, {
@@ -195,6 +197,8 @@ export async function executeSyncContinuation(
      return `Failed to send continuation prompt: ${errorMessage}\n\nTask ID: ${continuationID}`
    }
 
+    let goalResumesUsed = 0
+    while (true) {
     try {
       const pollError = await deps.pollSyncSession(ctx, client, {
         sessionID: continuationID,
@@ -231,6 +235,29 @@ ${buildTaskMetadataBlock({
           agent: resumeAgent,
           category: args.category,
         })}`
+      } else if (pollError && shouldAutoResumeChild(pollError, goalResumesUsed)) {
+        goalResumesUsed++
+        log("[task] Auto-resuming stalled continuation session", { sessionID: continuationID, resume: goalResumesUsed })
+        try {
+          await promptWithModelSuggestionRetry(client, {
+            path: { id: continuationID },
+            body: {
+              ...(resumeAgent !== undefined ? { agent: resumeAgent } : {}),
+              ...(resumeModel !== undefined ? { model: resumeModel } : {}),
+              ...(resumeVariant !== undefined ? { variant: resumeVariant } : {}),
+              system: systemContent,
+              tools,
+              parts: [{ type: "text", text: buildChildResumeNudge(args) }],
+            },
+          }, {
+            queueBehavior: "defer",
+            checkToolState: false,
+          })
+        } catch (resumeError) {
+          const resumeMessage = resumeError instanceof Error ? resumeError.message : String(resumeError)
+          return `Failed to send resume prompt: ${resumeMessage}\n\nTask ID: ${continuationID}`
+        }
+        continue
       } else if (pollError) {
         return pollError
       }
@@ -274,4 +301,5 @@ ${buildTaskMetadataBlock({
      detachFromManager?.()
      scheduleSyncSessionDeletion(client, continuationID)
    }
+    }
 }

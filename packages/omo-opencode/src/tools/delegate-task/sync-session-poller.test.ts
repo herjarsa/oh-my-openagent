@@ -1026,3 +1026,50 @@ describe("goal keyword completion", () => {
     expect(result).toContain("Task stalled")
   })
 })
+describe("text growth resets stall", () => {
+  beforeEach(() => {
+    const { __setTimingConfig } = require("./timing")
+    __setTimingConfig({ POLL_INTERVAL_MS: 10 })
+  })
+
+  afterEach(() => {
+    const { __resetTimingConfig } = require("./timing")
+    __resetTimingConfig()
+  })
+
+  test("does not stall a working tool-call loop with growing text", async () => {
+    // given: tool-call turns never heuristically complete, but text keeps growing
+    const { pollSyncSession } = require("./sync-session-poller")
+    let fetchCount = 0
+    const mockClient = {
+      session: {
+        messages: async () => {
+          fetchCount++
+          return {
+            data: [
+              { info: { id: "m1", role: "user" }, parts: [] },
+              {
+                info: { id: "m2", role: "assistant", finish: "tool-calls" },
+                parts: [{ type: "text", text: "progress-" + "x".repeat(fetchCount) }],
+              },
+            ],
+          }
+        },
+        status: async () => ({ data: { ses_stream: { type: "idle" } } }),
+        abort: async () => ({}),
+      },
+    }
+
+    // when: the bound is deliberately short so the run stays fast
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_stream",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+    }, 400)
+
+    // then: growth suppressed the 60-poll stall, so only the bound stopped it
+    expect(result).toContain("Poll inactivity timeout reached")
+    expect(fetchCount).toBeGreaterThanOrEqual(2)
+  })
+})
