@@ -110,3 +110,77 @@ export function shouldAutoResumeChild(pollError: string, resumesUsed: number): b
 export function buildChildResumeNudge(args: Pick<DelegateTaskArgs, "description">): string {
   return `Continue working on the task described as "${args.description}". If you already finished, reply now with your final answer. When fully done, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`
 }
+
+/**
+ * Same-session resend budget for transient send failures. The host sometimes
+ * rejects a prompt dispatch ("cannot send your message at this moment", gate
+ * deferral, turn stopped mid-flight) while the child session itself is fine.
+ * Re-sending the same prompt after a short wait revives the subagent instead
+ * of killing it. Counted and capped like the stall resumes: no unbounded loop.
+ */
+export const MAX_SEND_RETRIES = 3
+export const SEND_RETRY_BASE_DELAY_MS = 5_000
+
+/**
+ * True when a prompt-send failure is worth retrying after a delay. Matches only
+ * transport-level "not right now" failures, never caller or config errors:
+ * a retry cannot fix an unknown agent, a user abort, or a model problem.
+ */
+export function isTransientSendError(message: string): boolean {
+  const text = message.toLowerCase()
+  // Permanent: user abort, unknown agent key, model/auth problems.
+  if (/abort/.test(text)) return false
+  if (/agent not found|agent\.name/.test(text)) return false
+  if (/model not found|provider.*not found|not found.*model|unauthorized|api key|forbidden/.test(text)) return false
+  // Our own gate deferrals and dispatch timeouts: the send never landed.
+  if (/skipped by gate|timed out after \d+\s?ms/.test(text)) return true
+  // Host busy / turn-stopped rejections (EN + ES).
+  if (/cannot send|can't send|can not send|no puede enviar/.test(text)) return true
+  if (/stopped before.*send|send.*next message/.test(text)) return true
+  if (/session (is )?busy|turn .*running|already running|try again|en este momento/.test(text)) return true
+  // Local transport blips during dispatch.
+  if (/econnreset|econnrefused|etimedout|socket hang up|fetch failed|network error/.test(text)) return true
+  return false
+}
+
+/**
+ * Budget check mirroring shouldAutoResumeChild: transient sends retry within
+ * budget, anything else (or an exhausted budget) keeps its existing path.
+ */
+export function shouldRetrySendAfterDelay(message: string, retriesUsed: number): boolean {
+  return retriesUsed < MAX_SEND_RETRIES && isTransientSendError(message)
+}
+
+/**
+ * Progressive backoff: 5s, 10s, 15s. A stopped turn or a busy session
+ * usually clears in seconds; the progression covers slower recoveries without
+ * stalling the parent for minutes on a single send.
+ */
+export function sendRetryDelayMs(retriesUsed: number): number {
+  return SEND_RETRY_BASE_DELAY_MS * (retriesUsed + 1)
+}
+
+/** Timer promise. Own helper (not the poller wait) so callers can inject an
+ * instant fake in tests via the task deps objects. */
+export function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(milliseconds, 0))
+  })
+}
+
+/**
+ * True when the failure proves nothing was dispatched, so the gate's
+ * post-dispatch hold can be released before resending. Gate skips and explicit
+ * host rejections never dispatch; timeouts and transport blips might have, so
+ * those keep the hold as duplicate protection and rely on backoff instead.
+ */
+export function isCleanSendMiss(message: string): boolean {
+  const text = message.toLowerCase()
+  if (/timed out after \d+\s?ms/.test(text)) return false
+  if (/econnreset|econnrefused|etimedout|socket hang up|fetch failed|network error/.test(text)) return false
+  if (/skipped by gate/.test(text)) return true
+  if (/cannot send|can't send|can not send|no puede enviar/.test(text)) return true
+  if (/stopped before.*send|send.*next message/.test(text)) return true
+  if (/session (is )?busy|turn .*running|already running|try again|en este momento/.test(text)) return true
+  return false
+}

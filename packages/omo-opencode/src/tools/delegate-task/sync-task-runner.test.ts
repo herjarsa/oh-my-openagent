@@ -95,3 +95,72 @@ describe("runSyncTaskLoop goal supervision", () => {
     expect(built.createCalls()).toBe(0)
   })
 })
+
+describe("runSyncTaskLoop transient send retry", () => {
+  test("resends the same prompt in the same session after a transient failure", async () => {
+    // given: first send rejected as busy, second lands, poll completes
+    const { runSyncTaskLoop } = require("./sync-task-runner")
+    let sends = 0
+    let sleeps = 0
+    const sendSyncPrompt = async (...a: unknown[]) => {
+      sends++
+      if (sends === 1) return "promptAsync skipped by gate: reserved"
+      return null
+    }
+    const built = baseInput(
+      { sendSyncPrompt, sleep: async () => { sleeps++ } } as never,
+      [null],
+    )
+
+    // when
+    const result = await runSyncTaskLoop(built.input as never)
+
+    // then: same session resent once after a delay, result delivered
+    expect(result).toContain("final answer")
+    expect(sends).toBe(2)
+    expect(sleeps).toBe(1)
+    expect(built.sendPrompts).toHaveLength(0)
+  })
+
+  test("gives up after the send budget and returns the send error", async () => {
+    // given: the host keeps rejecting every send
+    const { runSyncTaskLoop } = require("./sync-task-runner")
+    let sends = 0
+    const sendSyncPrompt = async () => {
+      sends++
+      return "cannot send your message at this moment"
+    }
+    const built = baseInput(
+      { sendSyncPrompt, sleep: async () => {} } as never,
+      [null],
+    )
+
+    // when
+    const result = await runSyncTaskLoop(built.input as never)
+
+    // then: initial send plus exactly three resends, then the send error
+    expect(result).toContain("cannot send your message")
+    expect(sends).toBe(4)
+  })
+
+  test("does not retry a permanent send error", async () => {
+    // given: unknown agent key
+    const { runSyncTaskLoop } = require("./sync-task-runner")
+    let sends = 0
+    const sendSyncPrompt = async () => {
+      sends++
+      return 'Agent "nope" not found. Make sure the agent is registered'
+    }
+    const built = baseInput(
+      { sendSyncPrompt, sleep: async () => {} } as never,
+      [null],
+    )
+
+    // when
+    const result = await runSyncTaskLoop(built.input as never)
+
+    // then: single send, error returned without delay or fallback loop
+    expect(result).toContain("not found")
+    expect(sends).toBe(1)
+  })
+})

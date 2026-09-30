@@ -100,3 +100,63 @@ describe("child-goal", () => {
     expect(nudge).toContain(CHILD_DONE_KEYWORD)
   })
 })
+describe("transient send retry", () => {
+  test("matches transport-level not-right-now failures", async () => {
+    const { isTransientSendError } = require("./child-goal")
+    const transient = [
+      "promptAsync skipped by gate: reserved",
+      "prompt skipped by gate: active",
+      "promptAsync timed out after 30000ms",
+      "prompt timed out after 15000ms",
+      "The running turn was stopped before OpenCode could send the next message.",
+      "cannot send your message at this moment",
+      "no puede enviar tu mensaje en este momento",
+      "Session is busy",
+      "Network error: ECONNRESET",
+      "socket hang up",
+    ]
+    for (const message of transient) {
+      expect(isTransientSendError(message)).toBe(true)
+    }
+  })
+
+  test("never matches caller, config, model, abort or stall errors", async () => {
+    const { isTransientSendError } = require("./child-goal")
+    const permanent = [
+      'Agent "Sisyphus-Junior" not found. Make sure the agent is registered',
+      "MessageAbortedError: aborted by user",
+      "The operation was aborted.",
+      "ProviderModelNotFoundError: openai/gpt-5",
+      "Task stalled: idle child",
+      "Failed to create session: missing session ID",
+      "Something else broke",
+    ]
+    for (const message of permanent) {
+      expect(isTransientSendError(message)).toBe(false)
+    }
+  })
+
+  test("caps the resend budget with progressive backoff", async () => {
+    const { shouldRetrySendAfterDelay, sendRetryDelayMs } = require("./child-goal")
+    const transient = "promptAsync skipped by gate: reserved"
+    expect(shouldRetrySendAfterDelay(transient, 0)).toBe(true)
+    expect(shouldRetrySendAfterDelay(transient, 2)).toBe(true)
+    expect(shouldRetrySendAfterDelay(transient, 3)).toBe(false)
+    expect(shouldRetrySendAfterDelay('Agent "x" not found', 0)).toBe(false)
+    expect(sendRetryDelayMs(0)).toBe(5000)
+    expect(sendRetryDelayMs(1)).toBe(10000)
+    expect(sendRetryDelayMs(2)).toBe(15000)
+  })
+})
+
+describe("clean send miss", () => {
+  test("gate skips and host rejections release the hold, timeouts and network keep it", async () => {
+    const { isCleanSendMiss } = require("./child-goal")
+    expect(isCleanSendMiss("promptAsync skipped by gate: reserved")).toBe(true)
+    expect(isCleanSendMiss("cannot send your message at this moment")).toBe(true)
+    expect(isCleanSendMiss("The running turn was stopped before OpenCode could send the next message.")).toBe(true)
+    expect(isCleanSendMiss("promptAsync timed out after 30000ms")).toBe(false)
+    expect(isCleanSendMiss("socket hang up")).toBe(false)
+    expect(isCleanSendMiss('Agent "x" not found')).toBe(false)
+  })
+})

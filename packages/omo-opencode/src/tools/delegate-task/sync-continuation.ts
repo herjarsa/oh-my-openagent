@@ -11,12 +11,13 @@ import { resolveMessageContext } from "../../features/hook-message-injector"
 import { formatDuration } from "./time-formatter"
 import { syncContinuationDeps, type SyncContinuationDeps } from "./sync-continuation-deps"
 import { setSessionTools } from "../../shared/session-tools-store"
-import { buildChildResumeNudge, buildGoalSupervisedPrompt, shouldAutoResumeChild } from "./child-goal"
+import { buildChildResumeNudge, buildGoalSupervisedPrompt, isCleanSendMiss, sendRetryDelayMs, shouldAutoResumeChild, shouldRetrySendAfterDelay, sleep } from "./child-goal"
 import { normalizeAgentForPromptKey } from "../../shared/agent-display-names"
+import { log } from "../../shared/logger"
+import { releasePromptAsyncReservation } from "../../shared/prompt-async-gate"
 import { buildTaskMetadataBlock } from "../../features/tool-metadata-store/task-metadata-contract"
 import { getTaskID } from "./task-id"
 import { resolveMetadataModel } from "./resolve-metadata-model"
-import { log } from "../../shared/logger"
 import { cancelSyncSessionDeletion, scheduleSyncSessionDeletion } from "./sync-session-cleanup"
 
 type ResumeModel = { providerID: string; modelID: string }
@@ -132,6 +133,7 @@ export async function executeSyncContinuation(
 
   let allowTask = false
   let tools: Record<string, boolean> = { task: false, call_omo_agent: true, question: false }
+  const sleepFn = deps.sleep ?? sleep
 
   try {
     const resumeContext = await resolveResumeContext(client, continuationID)
@@ -173,20 +175,39 @@ export async function executeSyncContinuation(
     const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, resumeAgent, tddEnabled)
     setSessionTools(continuationID, tools)
 
-    await promptWithModelSuggestionRetry(client, {
-      path: { id: continuationID },
-      body: {
-        ...(resumeAgent !== undefined ? { agent: resumeAgent } : {}),
-        ...(resumeModel !== undefined ? { model: resumeModel } : {}),
-        ...(resumeVariant !== undefined ? { variant: resumeVariant } : {}),
-        system: systemContent,
-        tools,
-        parts: [{ type: "text", text: effectivePrompt }],
-      },
-    }, {
-      queueBehavior: "defer",
-      checkToolState: false,
-    })
+    let continuationSendRetries = 0
+    // Transient host/gate send failures: wait and resend in the same session
+    // instead of killing the continuation. Non-transient errors (or an
+    // exhausted budget) rethrow to the existing failure path below.
+    for (;;) {
+      try {
+        await promptWithModelSuggestionRetry(client, {
+          path: { id: continuationID },
+          body: {
+            ...(resumeAgent !== undefined ? { agent: resumeAgent } : {}),
+            ...(resumeModel !== undefined ? { model: resumeModel } : {}),
+            ...(resumeVariant !== undefined ? { variant: resumeVariant } : {}),
+            system: systemContent,
+            tools,
+            parts: [{ type: "text", text: effectivePrompt }],
+          },
+        }, {
+          queueBehavior: "defer",
+          checkToolState: false,
+        })
+        break
+      } catch (sendError) {
+        const sendMessage = sendError instanceof Error ? sendError.message : String(sendError)
+        if (!shouldRetrySendAfterDelay(sendMessage, continuationSendRetries)) throw sendError
+        const delayMs = sendRetryDelayMs(continuationSendRetries)
+        continuationSendRetries++
+        log("[task] Transient continuation send failure, retrying in same session", { sessionID: continuationID, delayMs, attempt: continuationSendRetries })
+        if (isCleanSendMiss(sendMessage)) {
+          releasePromptAsyncReservation(continuationID, "transient-send-retry", { supersedeTransientRetryOwners: true })
+        }
+        await sleepFn(delayMs)
+      }
+    }
    } catch (promptError) {
      if (toastManager) {
        toastManager.removeTask(taskId)
@@ -239,6 +260,11 @@ ${buildTaskMetadataBlock({
         goalResumesUsed++
         log("[task] Auto-resuming stalled continuation session", { sessionID: continuationID, resume: goalResumesUsed })
         try {
+          // Transient host/gate send failures: wait and resend the nudge in the
+          // same session instead of killing the continuation.
+          let resumeSendRetries = 0
+          for (;;) {
+          try {
           await promptWithModelSuggestionRetry(client, {
             path: { id: continuationID },
             body: {
@@ -253,6 +279,18 @@ ${buildTaskMetadataBlock({
             queueBehavior: "defer",
             checkToolState: false,
           })
+          } catch (sendError) {
+            const sendMessage = sendError instanceof Error ? sendError.message : String(sendError)
+            if (!shouldRetrySendAfterDelay(sendMessage, resumeSendRetries)) throw sendError
+            const delayMs = sendRetryDelayMs(resumeSendRetries)
+            resumeSendRetries++
+            log("[task] Transient resume send failure, retrying in same session", { sessionID: continuationID, delayMs, attempt: resumeSendRetries })
+          if (isCleanSendMiss(sendMessage)) {
+          releasePromptAsyncReservation(continuationID, "transient-send-retry", { supersedeTransientRetryOwners: true })
+        }
+            await sleepFn(delayMs)
+          }
+          }
         } catch (resumeError) {
           const resumeMessage = resumeError instanceof Error ? resumeError.message : String(resumeError)
           return `Failed to send resume prompt: ${resumeMessage}\n\nTask ID: ${continuationID}`
