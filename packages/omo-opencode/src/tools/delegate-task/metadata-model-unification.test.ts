@@ -41,6 +41,7 @@ describe("metadata model unification", () => {
           sendSyncPrompt: async () => null,
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
         const args: DelegateTaskArgs = {
           description: "test", prompt: "do it",
@@ -154,6 +155,7 @@ describe("metadata model unification", () => {
         const deps = {
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
 
         await executeSyncContinuation(args, ctx, unsafeTestValue({
@@ -184,6 +186,7 @@ describe("metadata model unification", () => {
           sendSyncPrompt: async () => null,
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
         const args: DelegateTaskArgs = {
           description: "test", prompt: "do it",
@@ -298,6 +301,7 @@ describe("metadata model unification", () => {
         const deps = {
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
 
         await executeSyncContinuation(args, ctx, unsafeTestValue({
@@ -325,6 +329,7 @@ describe("metadata model unification", () => {
         sendSyncPrompt: async () => null,
         pollSyncSession: async () => null,
         fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+         sleep: async () => {},
       }
       const args: DelegateTaskArgs = {
         description: "test", prompt: "do it",
@@ -359,6 +364,7 @@ describe("metadata model unification", () => {
           sendSyncPrompt: async () => null,
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
         const args: DelegateTaskArgs = {
           description: "test", prompt: "do it",
@@ -473,6 +479,7 @@ describe("metadata model unification", () => {
         const deps = {
           pollSyncSession: async () => null,
           fetchSyncResult: async () => ({ ok: true as const, textContent: "done" }),
+           sleep: async () => {},
         }
 
         await executeSyncContinuation(args, ctx, unsafeTestValue({

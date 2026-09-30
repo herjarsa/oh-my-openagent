@@ -7776,11 +7776,14 @@ function extractPromptFailureMessage(error) {
 }
 function isAmbiguousPromptDispatchFailure(error) {
   const message = extractPromptFailureMessage(error).toLowerCase();
+  if (message.includes(CLEAN_GATE_SKIP))
+    return false;
   return message.includes("unexpected eof") || message.includes("json parse error") || message.includes("unexpected end of json input") || message.includes("timed out");
 }
 function isAmbiguousPostDispatchPromptFailure(result) {
   return result.dispatchAttempted === true && isAmbiguousPromptDispatchFailure(result.error);
 }
+var CLEAN_GATE_SKIP = "skipped by gate";
 
 // packages/utils/src/zip-entry-listing/python-zip-entry-listing.ts
 function isPythonZipListingAvailable() {
@@ -134512,6 +134515,107 @@ function formatDuration2(start, end) {
   return `${seconds}s`;
 }
 
+// packages/omo-opencode/src/tools/delegate-task/child-goal.ts
+var CHILD_DONE_KEYWORD = "[TASK_DONE]";
+var STALL_ERROR_PREFIX = "Task stalled:";
+var MAX_CHILD_GOAL_RESUMES = 2;
+var CHILD_GOAL_APPEND = `
+
+When your task is fully complete, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
+function buildGoalSupervisedPrompt(prompt, agentName, tddEnabled) {
+  return `${buildTaskPrompt(prompt, agentName, tddEnabled)}${CHILD_GOAL_APPEND}`;
+}
+function assistantTextOf(msg) {
+  return (msg.parts ?? []).filter((p) => p.type === "text" || p.type === "reasoning").map((p) => p.text ?? "").filter((text) => text.length > 0).join(`
+`);
+}
+function hasGoalKeywordInLatest(messages, anchorMessageID, anchorMessageCount) {
+  let scoped;
+  if (anchorMessageID !== undefined) {
+    const anchorIndex = messages.findIndex((message) => message.info?.id === anchorMessageID);
+    scoped = anchorIndex === -1 ? messages : messages.slice(anchorIndex + 1);
+  } else if (anchorMessageCount !== undefined) {
+    scoped = messages.slice(anchorMessageCount);
+  } else {
+    scoped = messages;
+  }
+  for (let i = scoped.length - 1;i >= 0; i--) {
+    const msg = scoped[i];
+    if (msg?.info?.role !== "assistant")
+      continue;
+    const text = assistantTextOf(msg);
+    if (!text)
+      continue;
+    return text.includes(CHILD_DONE_KEYWORD);
+  }
+  return false;
+}
+function stripGoalKeyword(text) {
+  if (!text.includes(CHILD_DONE_KEYWORD))
+    return text;
+  return text.split(`
+`).filter((line) => !line.includes(CHILD_DONE_KEYWORD)).join(`
+`).trim();
+}
+function isStallPollError(pollError) {
+  return pollError.startsWith(STALL_ERROR_PREFIX);
+}
+function shouldAutoResumeChild(pollError, resumesUsed) {
+  return resumesUsed < MAX_CHILD_GOAL_RESUMES && isStallPollError(pollError);
+}
+function buildChildResumeNudge(args) {
+  return `Continue working on the task described as "${args.description}". If you already finished, reply now with your final answer. When fully done, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
+}
+var MAX_SEND_RETRIES = 3;
+var SEND_RETRY_BASE_DELAY_MS = 5000;
+function isTransientSendError(message) {
+  const text = message.toLowerCase();
+  if (/abort/.test(text))
+    return false;
+  if (/agent not found|agent\.name/.test(text))
+    return false;
+  if (/model not found|provider.*not found|not found.*model|unauthorized|api key|forbidden/.test(text))
+    return false;
+  if (/skipped by gate|timed out after \d+\s?ms/.test(text))
+    return true;
+  if (/cannot send|can't send|can not send|no puede enviar/.test(text))
+    return true;
+  if (/stopped before.*send|send.*next message/.test(text))
+    return true;
+  if (/session (is )?busy|turn .*running|already running|try again|en este momento/.test(text))
+    return true;
+  if (/econnreset|econnrefused|etimedout|socket hang up|fetch failed|network error/.test(text))
+    return true;
+  return false;
+}
+function shouldRetrySendAfterDelay(message, retriesUsed) {
+  return retriesUsed < MAX_SEND_RETRIES && isTransientSendError(message);
+}
+function sendRetryDelayMs(retriesUsed) {
+  return SEND_RETRY_BASE_DELAY_MS * (retriesUsed + 1);
+}
+function sleep2(milliseconds) {
+  return new Promise((resolve33) => {
+    setTimeout(resolve33, Math.max(milliseconds, 0));
+  });
+}
+function isCleanSendMiss(message) {
+  const text = message.toLowerCase();
+  if (/timed out after \d+\s?ms/.test(text))
+    return false;
+  if (/econnreset|econnrefused|etimedout|socket hang up|fetch failed|network error/.test(text))
+    return false;
+  if (/skipped by gate/.test(text))
+    return true;
+  if (/cannot send|can't send|can not send|no puede enviar/.test(text))
+    return true;
+  if (/stopped before.*send|send.*next message/.test(text))
+    return true;
+  if (/session (is )?busy|turn .*running|already running|try again|en este momento/.test(text))
+    return true;
+  return false;
+}
+
 // packages/omo-opencode/src/tools/delegate-task/timing.ts
 var POLL_INTERVAL_MS = 1000;
 var MIN_STABILITY_TIME_MS = 1e4;
@@ -134593,60 +134697,6 @@ function getTerminalSessionError(messages) {
 // packages/omo-opencode/src/tools/delegate-task/sync-session-poller.ts
 init_logger2();
 init_shared();
-
-// packages/omo-opencode/src/tools/delegate-task/child-goal.ts
-var CHILD_DONE_KEYWORD = "[TASK_DONE]";
-var STALL_ERROR_PREFIX = "Task stalled:";
-var MAX_CHILD_GOAL_RESUMES = 2;
-var CHILD_GOAL_APPEND = `
-
-When your task is fully complete, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
-function buildGoalSupervisedPrompt(prompt, agentName, tddEnabled) {
-  return `${buildTaskPrompt(prompt, agentName, tddEnabled)}${CHILD_GOAL_APPEND}`;
-}
-function assistantTextOf(msg) {
-  return (msg.parts ?? []).filter((p) => p.type === "text" || p.type === "reasoning").map((p) => p.text ?? "").filter((text) => text.length > 0).join(`
-`);
-}
-function hasGoalKeywordInLatest(messages, anchorMessageID, anchorMessageCount) {
-  let scoped;
-  if (anchorMessageID !== undefined) {
-    const anchorIndex = messages.findIndex((message) => message.info?.id === anchorMessageID);
-    scoped = anchorIndex === -1 ? messages : messages.slice(anchorIndex + 1);
-  } else if (anchorMessageCount !== undefined) {
-    scoped = messages.slice(anchorMessageCount);
-  } else {
-    scoped = messages;
-  }
-  for (let i = scoped.length - 1;i >= 0; i--) {
-    const msg = scoped[i];
-    if (msg?.info?.role !== "assistant")
-      continue;
-    const text = assistantTextOf(msg);
-    if (!text)
-      continue;
-    return text.includes(CHILD_DONE_KEYWORD);
-  }
-  return false;
-}
-function stripGoalKeyword(text) {
-  if (!text.includes(CHILD_DONE_KEYWORD))
-    return text;
-  return text.split(`
-`).filter((line) => !line.includes(CHILD_DONE_KEYWORD)).join(`
-`).trim();
-}
-function isStallPollError(pollError) {
-  return pollError.startsWith(STALL_ERROR_PREFIX);
-}
-function shouldAutoResumeChild(pollError, resumesUsed) {
-  return resumesUsed < MAX_CHILD_GOAL_RESUMES && isStallPollError(pollError);
-}
-function buildChildResumeNudge(args) {
-  return `Continue working on the task described as "${args.description}". If you already finished, reply now with your final answer. When fully done, end your final message with ${CHILD_DONE_KEYWORD} on its own line and nothing after it.`;
-}
-
-// packages/omo-opencode/src/tools/delegate-task/sync-session-poller.ts
 var ACTIVE_SESSION_STATUSES2 = new Set(["busy", "retry", "running"]);
 var CHILD_WAKE_GRACE_MS = 5000;
 var MAX_NON_ACTIVE_STATUS_STALENESS_POLLS = 10;
@@ -135015,13 +135065,15 @@ Session ID: ${sessionID}`
 // packages/omo-opencode/src/tools/delegate-task/sync-continuation-deps.ts
 var syncContinuationDeps = {
   pollSyncSession,
-  fetchSyncResult
+  fetchSyncResult,
+  sleep: sleep2
 };
 
 // packages/omo-opencode/src/tools/delegate-task/sync-continuation.ts
 init_session_tools_store();
 init_agent_display_names();
 init_logger2();
+init_prompt_async_gate2();
 
 // packages/omo-opencode/src/features/background-agent/constants.ts
 var TASK_TTL_MS = 30 * 60 * 1000;
@@ -135146,6 +135198,7 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
   let handedBackToParent = false;
   let allowTask = false;
   let tools = { task: false, call_omo_agent: true, question: false };
+  const sleepFn = deps.sleep ?? sleep2;
   try {
     const resumeContext = await resolveResumeContext(client3, continuationID);
     resumeAgent = resumeContext.resumeAgent;
@@ -135178,20 +135231,37 @@ async function executeSyncContinuation(args, ctx, executorCtx, parentContext, de
     const tddEnabled = sisyphusAgentConfig?.tdd;
     const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, resumeAgent, tddEnabled);
     setSessionTools(continuationID, tools);
-    await promptWithModelSuggestionRetry(client3, {
-      path: { id: continuationID },
-      body: {
-        ...resumeAgent !== undefined ? { agent: resumeAgent } : {},
-        ...resumeModel !== undefined ? { model: resumeModel } : {},
-        ...resumeVariant !== undefined ? { variant: resumeVariant } : {},
-        system: systemContent,
-        tools,
-        parts: [{ type: "text", text: effectivePrompt }]
+    let continuationSendRetries = 0;
+    for (;; ) {
+      try {
+        await promptWithModelSuggestionRetry(client3, {
+          path: { id: continuationID },
+          body: {
+            ...resumeAgent !== undefined ? { agent: resumeAgent } : {},
+            ...resumeModel !== undefined ? { model: resumeModel } : {},
+            ...resumeVariant !== undefined ? { variant: resumeVariant } : {},
+            system: systemContent,
+            tools,
+            parts: [{ type: "text", text: effectivePrompt }]
+          }
+        }, {
+          queueBehavior: "defer",
+          checkToolState: false
+        });
+        break;
+      } catch (sendError) {
+        const sendMessage = sendError instanceof Error ? sendError.message : String(sendError);
+        if (!shouldRetrySendAfterDelay(sendMessage, continuationSendRetries))
+          throw sendError;
+        const delayMs = sendRetryDelayMs(continuationSendRetries);
+        continuationSendRetries++;
+        log2("[task] Transient continuation send failure, retrying in same session", { sessionID: continuationID, delayMs, attempt: continuationSendRetries });
+        if (isCleanSendMiss(sendMessage)) {
+          releasePromptAsyncReservation(continuationID, "transient-send-retry", { supersedeTransientRetryOwners: true });
+        }
+        await sleepFn(delayMs);
       }
-    }, {
-      queueBehavior: "defer",
-      checkToolState: false
-    });
+    }
   } catch (promptError) {
     if (toastManager) {
       toastManager.removeTask(taskId);
@@ -135243,20 +135313,36 @@ ${buildTaskMetadataBlock({
         goalResumesUsed++;
         log2("[task] Auto-resuming stalled continuation session", { sessionID: continuationID, resume: goalResumesUsed });
         try {
-          await promptWithModelSuggestionRetry(client3, {
-            path: { id: continuationID },
-            body: {
-              ...resumeAgent !== undefined ? { agent: resumeAgent } : {},
-              ...resumeModel !== undefined ? { model: resumeModel } : {},
-              ...resumeVariant !== undefined ? { variant: resumeVariant } : {},
-              system: systemContent,
-              tools,
-              parts: [{ type: "text", text: buildChildResumeNudge(args) }]
+          let resumeSendRetries = 0;
+          for (;; ) {
+            try {
+              await promptWithModelSuggestionRetry(client3, {
+                path: { id: continuationID },
+                body: {
+                  ...resumeAgent !== undefined ? { agent: resumeAgent } : {},
+                  ...resumeModel !== undefined ? { model: resumeModel } : {},
+                  ...resumeVariant !== undefined ? { variant: resumeVariant } : {},
+                  system: systemContent,
+                  tools,
+                  parts: [{ type: "text", text: buildChildResumeNudge(args) }]
+                }
+              }, {
+                queueBehavior: "defer",
+                checkToolState: false
+              });
+            } catch (sendError) {
+              const sendMessage = sendError instanceof Error ? sendError.message : String(sendError);
+              if (!shouldRetrySendAfterDelay(sendMessage, resumeSendRetries))
+                throw sendError;
+              const delayMs = sendRetryDelayMs(resumeSendRetries);
+              resumeSendRetries++;
+              log2("[task] Transient resume send failure, retrying in same session", { sessionID: continuationID, delayMs, attempt: resumeSendRetries });
+              if (isCleanSendMiss(sendMessage)) {
+                releasePromptAsyncReservation(continuationID, "transient-send-retry", { supersedeTransientRetryOwners: true });
+              }
+              await sleepFn(delayMs);
             }
-          }, {
-            queueBehavior: "defer",
-            checkToolState: false
-          });
+          }
         } catch (resumeError) {
           const resumeMessage = resumeError instanceof Error ? resumeError.message : String(resumeError);
           return `Failed to send resume prompt: ${resumeMessage}
@@ -135977,7 +136063,8 @@ var syncTaskDeps = {
   sendSyncPrompt,
   pollSyncSession,
   fetchSyncResult,
-  isProviderExhaustionFallbackEligible
+  isProviderExhaustionFallbackEligible,
+  sleep: sleep2
 };
 
 // packages/omo-opencode/src/tools/delegate-task/sync-task-metadata.ts
@@ -136003,6 +136090,7 @@ async function publishSyncTaskMetadata(input) {
 }
 
 // packages/omo-opencode/src/tools/delegate-task/sync-task-runner.ts
+init_prompt_async_gate2();
 init_logger2();
 init_constants2();
 
@@ -136208,6 +136296,8 @@ async function runSyncTaskLoop(input) {
   let activeSessionID = input.sessionID;
   let currentArgs = args;
   let goalResumesUsed = 0;
+  let sendRetriesUsed = 0;
+  const sleepFn = deps.sleep ?? sleep2;
   while (true) {
     let promptError = await deps.sendSyncPrompt(client3, {
       sessionID: activeSessionID,
@@ -136221,30 +136311,54 @@ async function runSyncTaskLoop(input) {
       categoryModel: effectiveCategoryModel
     });
     if (promptError) {
-      const promptResult = await retrySyncPromptWithFallbacks({
-        sessionID: activeSessionID,
-        initialError: promptError,
-        categoryModel: effectiveCategoryModel,
-        fallbackChain,
-        sendPrompt: async (fallbackModel) => {
-          return deps.sendSyncPrompt(client3, {
-            sessionID: activeSessionID,
-            agentToUse,
-            args: currentArgs,
-            systemContent,
-            directory,
-            toastManager,
-            taskId,
-            sisyphusAgentConfig,
-            categoryModel: fallbackModel
-          });
+      while (shouldRetrySendAfterDelay(promptError, sendRetriesUsed)) {
+        const delayMs = sendRetryDelayMs(sendRetriesUsed);
+        sendRetriesUsed++;
+        log2("[task] Transient send failure, retrying in same session", { sessionID: activeSessionID, agentToUse, delayMs, attempt: sendRetriesUsed });
+        if (isCleanSendMiss(promptError)) {
+          releasePromptAsyncReservation(activeSessionID, "transient-send-retry", { supersedeTransientRetryOwners: true });
         }
-      });
-      promptError = promptResult.promptError;
-      effectiveCategoryModel = promptResult.categoryModel;
-      fallbackState = promptResult.fallbackState ?? fallbackState;
+        await sleepFn(delayMs);
+        promptError = await deps.sendSyncPrompt(client3, {
+          sessionID: activeSessionID,
+          agentToUse,
+          args: currentArgs,
+          systemContent,
+          directory,
+          toastManager,
+          taskId,
+          sisyphusAgentConfig,
+          categoryModel: effectiveCategoryModel
+        });
+        if (!promptError)
+          break;
+      }
       if (promptError) {
-        return promptError;
+        const promptResult = await retrySyncPromptWithFallbacks({
+          sessionID: activeSessionID,
+          initialError: promptError,
+          categoryModel: effectiveCategoryModel,
+          fallbackChain,
+          sendPrompt: async (fallbackModel) => {
+            return deps.sendSyncPrompt(client3, {
+              sessionID: activeSessionID,
+              agentToUse,
+              args: currentArgs,
+              systemContent,
+              directory,
+              toastManager,
+              taskId,
+              sisyphusAgentConfig,
+              categoryModel: fallbackModel
+            });
+          }
+        });
+        promptError = promptResult.promptError;
+        effectiveCategoryModel = promptResult.categoryModel;
+        fallbackState = promptResult.fallbackState ?? fallbackState;
+        if (promptError) {
+          return promptError;
+        }
       }
     }
     const pollError = await deps.pollSyncSession(ctx, client3, {
@@ -155940,7 +156054,7 @@ function markReplyListenerStopped(state3, error) {
 }
 
 // packages/openclaw-core/src/reply-listener-sleep.ts
-function sleep2(ms) {
+function sleep3(ms) {
   return new Promise((resolve35) => setTimeout(resolve35, ms));
 }
 
@@ -156110,7 +156224,7 @@ async function waitForDaemonToStop(timeoutMs) {
     if (!await isDaemonRunning()) {
       return true;
     }
-    await sleep2(10);
+    await sleep3(10);
   }
   return !await isDaemonRunning();
 }
@@ -156120,7 +156234,7 @@ async function waitForReplyListenerProcessExit(pid, timeoutMs) {
     if (!isReplyListenerProcessRunning(pid)) {
       return true;
     }
-    await sleep2(10);
+    await sleep3(10);
   }
   return !isReplyListenerProcessRunning(pid);
 }
@@ -156281,7 +156395,7 @@ async function startReplyListener(config2) {
       startupToken,
       timeoutMs: getReplyListenerStartupTimeoutMs(),
       readState: readReplyListenerDaemonState,
-      sleep: sleep2
+      sleep: sleep3
     });
     if (!readyState) {
       await terminateReplyListenerProcess(processInfo.pid);
@@ -168294,7 +168408,7 @@ function createTeamModeToolsRecord(args) {
 // node_modules/.bun/@opencode-ai+sdk@1.18.31/node_modules/@opencode-ai/sdk/dist/v2/gen/core/serverSentEvents.gen.js
 var createSseClient2 = ({ onRequest, onSseError, onSseEvent, responseTransformer, responseValidator, sseDefaultRetryDelay, sseMaxRetryAttempts, sseMaxRetryDelay, sseSleepFn, url: url2, ...options }) => {
   let lastEventId;
-  const sleep3 = sseSleepFn ?? ((ms) => new Promise((resolve38) => setTimeout(resolve38, ms)));
+  const sleep4 = sseSleepFn ?? ((ms) => new Promise((resolve38) => setTimeout(resolve38, ms)));
   const createStream = async function* () {
     let retryDelay = sseDefaultRetryDelay ?? 3000;
     let attempt = 0;
@@ -168407,7 +168521,7 @@ var createSseClient2 = ({ onRequest, onSseError, onSseEvent, responseTransformer
           break;
         }
         const backoff = Math.min(retryDelay * 2 ** (attempt - 1), sseMaxRetryDelay ?? 30000);
-        await sleep3(backoff);
+        await sleep4(backoff);
       }
     }
   };

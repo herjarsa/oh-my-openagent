@@ -3,8 +3,9 @@ import type { ModelFallbackInfo } from "../../features/task-toast-manager/types"
 import type { ModelFallbackState } from "../../hooks/model-fallback/hook"
 import type { FallbackEntry } from "../../shared/model-requirements"
 import { shouldRetryError } from "../../shared/model-error-classifier"
+import { releasePromptAsyncReservation } from "../../shared/prompt-async-gate"
 import { log } from "../../shared/logger"
-import { buildChildResumeNudge, shouldAutoResumeChild } from "./child-goal"
+import { buildChildResumeNudge, isCleanSendMiss, sendRetryDelayMs, shouldAutoResumeChild, shouldRetrySendAfterDelay, sleep } from "./child-goal"
 import { getDeliverableTag } from "./constants"
 import type { ExecutorContext, ParentContext } from "./executor-types"
 import { buildRecoveredSyncTaskCompletion, buildSyncTaskCompletion } from "./sync-completion-message"
@@ -104,6 +105,8 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
   let activeSessionID = input.sessionID
   let currentArgs = args
   let goalResumesUsed = 0
+  let sendRetriesUsed = 0
+  const sleepFn = deps.sleep ?? sleep
 
   while (true) {
     let promptError = await deps.sendSyncPrompt(client, {
@@ -118,6 +121,35 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
       categoryModel: effectiveCategoryModel,
     })
     if (promptError) {
+      // Transient send failure (host busy, gate deferral, turn stopped): wait
+      // and resend the same prompt in the same session instead of killing the
+      // child. Same prompt, same model, context preserved. Budget is per task.
+      while (shouldRetrySendAfterDelay(promptError, sendRetriesUsed)) {
+        const delayMs = sendRetryDelayMs(sendRetriesUsed)
+        sendRetriesUsed++
+        log("[task] Transient send failure, retrying in same session", { sessionID: activeSessionID, agentToUse, delayMs, attempt: sendRetriesUsed })
+        if (isCleanSendMiss(promptError)) {
+          // The reservation is owned by "model-suggestion-retry" (the dispatch that just
+          // failed cleanly), so a plain release would be rejected as a source
+          // mismatch. supersedeTransientRetryOwners exists for exactly this recovery.
+          releasePromptAsyncReservation(activeSessionID, "transient-send-retry", { supersedeTransientRetryOwners: true })
+        }
+        await sleepFn(delayMs)
+        promptError = await deps.sendSyncPrompt(client, {
+          sessionID: activeSessionID,
+          agentToUse,
+          args: currentArgs,
+          systemContent,
+          directory,
+          toastManager,
+          taskId,
+          sisyphusAgentConfig,
+          categoryModel: effectiveCategoryModel,
+        })
+        if (!promptError) break
+      }
+      // Resend landed: promptError is null, fall through to polling the revived turn.
+      if (promptError) {
       const promptResult = await retrySyncPromptWithFallbacks({
         sessionID: activeSessionID,
         initialError: promptError,
@@ -144,6 +176,7 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
 
       if (promptError) {
         return promptError
+      }
       }
     }
 

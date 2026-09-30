@@ -1,4 +1,5 @@
 import { isProviderExhaustionFallbackEligible } from "@oh-my-opencode/model-core"
+import { sleep } from "./child-goal"
 import { createSyncSession } from "./sync-session-creator"
 import { sendSyncPrompt } from "./sync-prompt-sender"
 import { pollSyncSession } from "./sync-session-poller"
@@ -10,6 +11,7 @@ export type SyncTaskDeps = {
   readonly pollSyncSession: typeof pollSyncSession
   readonly fetchSyncResult: typeof fetchSyncResult
   readonly isProviderExhaustionFallbackEligible?: typeof isProviderExhaustionFallbackEligible
+  readonly sleep?: (milliseconds: number) => Promise<void>
 }
 
 export const syncTaskDeps: SyncTaskDeps = {
@@ -18,4 +20,5 @@ export const syncTaskDeps: SyncTaskDeps = {
   pollSyncSession,
   fetchSyncResult,
   isProviderExhaustionFallbackEligible,
+  sleep,
 }

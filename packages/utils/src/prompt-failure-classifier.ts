@@ -13,8 +13,18 @@ export function extractPromptFailureMessage(error: unknown): string {
   return String(error)
 }
 
+/**
+ * Gate statuses that mean the dispatch never reached the host: the send is a
+ * known miss, not an ambiguous one, so it must surface to the caller instead
+ * of being swallowed as a post-dispatch ambiguity.
+ */
+const CLEAN_GATE_SKIP = "skipped by gate"
+
 export function isAmbiguousPromptDispatchFailure(error: unknown): boolean {
   const message = extractPromptFailureMessage(error).toLowerCase()
+  // A gate skip never dispatched. Classifying it as ambiguous silently swallows
+  // it and leaves the caller polling a session that never got the prompt.
+  if (message.includes(CLEAN_GATE_SKIP)) return false
   return (
     message.includes("unexpected eof")
     || message.includes("json parse error")
