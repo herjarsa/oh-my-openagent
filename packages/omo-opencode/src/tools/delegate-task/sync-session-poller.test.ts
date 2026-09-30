@@ -952,3 +952,77 @@ describe("no-progress fail-fast", () => {
     expect(result).toBeNull()
   })
 })
+describe("goal keyword completion", () => {
+  beforeEach(() => {
+    __setTimingConfig({ POLL_INTERVAL_MS: 10, MAX_POLL_TIME_MS: 5000 })
+  })
+
+  afterEach(() => {
+    __resetTimingConfig()
+  })
+
+  test("completes immediately when the newest assistant turn carries the keyword", async () => {
+    // given: keyword answer, no finish flag, continuation still owed
+    const { pollSyncSession } = require("./sync-session-poller")
+    const { CHILD_DONE_KEYWORD } = require("./child-goal")
+    const mockClient = {
+      session: {
+        messages: async () => ({
+          data: [
+            { info: { id: "msg_001", role: "user", time: { created: 1000 } }, parts: [] },
+            {
+              info: { id: "msg_002", role: "assistant", time: { created: 2000 } },
+              parts: [{ type: "text", text: `the verdict\n${CHILD_DONE_KEYWORD}` }],
+            },
+          ],
+        }),
+        status: async () => ({ data: { "ses_goal": { type: "idle" } } }),
+        abort: async () => ({}),
+      },
+    }
+
+    // when: polling with a pending continuation that would otherwise wait
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_goal",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+      hasActiveChildBackgroundTasks: () => true,
+    })
+
+    // then: keyword overrides the wait, no stall, no timeout
+    expect(result).toBeNull()
+  })
+
+  test("ignores a keyword that predates the anchor", async () => {
+    // given: keyword turn followed by a fresh user turn used as anchor
+    const { pollSyncSession } = require("./sync-session-poller")
+    const { CHILD_DONE_KEYWORD } = require("./child-goal")
+    const staticMessages = {
+      data: [
+        { info: { id: "m1", role: "user" }, parts: [] },
+        { info: { id: "m2", role: "assistant" }, parts: [{ type: "text", text: CHILD_DONE_KEYWORD }] },
+        { info: { id: "m3", role: "user" }, parts: [{ type: "text", text: "keep going" }] },
+      ],
+    }
+    const mockClient = {
+      session: {
+        messages: async () => staticMessages,
+        status: async () => ({ data: { "ses_oldkey": { type: "idle" } } }),
+        abort: async () => ({}),
+      },
+    }
+
+    // when: anchored after the keyword turn with nothing new after it
+    const result = await pollSyncSession(createMockCtx(), mockClient, {
+      sessionID: "ses_oldkey",
+      agentToUse: "test-agent",
+      toastManager: null,
+      taskId: undefined,
+      anchorMessageID: "m3",
+    })
+
+    // then: old keyword does not complete; dead child stalls fast
+    expect(result).toContain("Task stalled")
+  })
+})

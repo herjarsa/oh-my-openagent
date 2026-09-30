@@ -11,7 +11,7 @@ import { routePromptRetry } from "../../shared/session-route"
 import { setSessionTools } from "../../shared/session-tools-store"
 import { isPlanFamily } from "./constants"
 import { formatDetailedError } from "./error-formatting"
-import { buildTaskPrompt } from "./prompt-builder"
+import { buildGoalSupervisedPrompt } from "./child-goal"
 import type { DelegatedModelConfig, DelegateTaskArgs, OpencodeClient } from "./types"
 
 type SendSyncPromptDeps = {
@@ -85,7 +85,7 @@ export async function sendSyncPrompt(
   deps: SendSyncPromptDeps = sendSyncPromptDeps
 ): Promise<string | null> {
   const tddEnabled = input.sisyphusAgentConfig?.tdd
-  const effectivePrompt = buildTaskPrompt(input.args.prompt, input.agentToUse, tddEnabled)
+  const effectivePrompt = buildGoalSupervisedPrompt(input.args.prompt, input.agentToUse, tddEnabled)
   const userPermission = input.categoryModel?.tools
     ? migrateToolsToPermission(input.categoryModel.tools)
     : undefined

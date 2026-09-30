@@ -3,6 +3,8 @@ import type { ModelFallbackInfo } from "../../features/task-toast-manager/types"
 import type { ModelFallbackState } from "../../hooks/model-fallback/hook"
 import type { FallbackEntry } from "../../shared/model-requirements"
 import { shouldRetryError } from "../../shared/model-error-classifier"
+import { log } from "../../shared/logger"
+import { buildChildResumeNudge, shouldAutoResumeChild } from "./child-goal"
 import { getDeliverableTag } from "./constants"
 import type { ExecutorContext, ParentContext } from "./executor-types"
 import { buildRecoveredSyncTaskCompletion, buildSyncTaskCompletion } from "./sync-completion-message"
@@ -100,12 +102,14 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
       }
     : undefined
   let activeSessionID = input.sessionID
+  let currentArgs = args
+  let goalResumesUsed = 0
 
   while (true) {
     let promptError = await deps.sendSyncPrompt(client, {
       sessionID: activeSessionID,
       agentToUse,
-      args,
+      args: currentArgs,
       systemContent,
       directory,
       toastManager,
@@ -123,7 +127,7 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
           return deps.sendSyncPrompt(client, {
             sessionID: activeSessionID,
             agentToUse,
-            args,
+            args: currentArgs,
             systemContent,
             directory,
             toastManager,
@@ -152,6 +156,15 @@ export async function runSyncTaskLoop(input: SyncTaskRunnerInput): Promise<strin
       hasPendingParentWake,
     }, syncPollTimeoutMs)
     if (pollError) {
+      // Goal supervision: a stalled child gets a same-session resume nudge (context
+      // preserved) within budget instead of failing the parent immediately. The
+      // nudge restates the goal keyword so the resumed turn can complete cleanly.
+      if (shouldAutoResumeChild(pollError, goalResumesUsed)) {
+        goalResumesUsed++
+        log("[task] Auto-resuming stalled child session", { sessionID: activeSessionID, agentToUse, resume: goalResumesUsed })
+        currentArgs = { ...args, prompt: buildChildResumeNudge(args) }
+        continue
+      }
       if (shouldAttemptPollErrorRecovery(pollError)) {
         const recoveredResult = await deps.fetchSyncResult(client, activeSessionID, undefined, {
           strictAbortRecovery: true,

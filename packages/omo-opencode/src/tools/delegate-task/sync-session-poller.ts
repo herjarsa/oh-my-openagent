@@ -4,6 +4,7 @@ import { getDefaultSyncPollTimeoutMs, getTimingConfig } from "./timing"
 import { getTerminalSessionError, isSessionComplete } from "./sync-session-turns"
 import { log } from "../../shared/logger"
 import { normalizeSDKResponse } from "../../shared"
+import { hasGoalKeywordInLatest, STALL_ERROR_PREFIX } from "./child-goal"
 
 export { isSessionComplete } from "./sync-session-turns"
 
@@ -210,7 +211,7 @@ export async function pollSyncSession(
         log("[task] Poll no-progress timeout reached", { sessionID: input.sessionID, pollCount })
         abortSyncSession(client, input.sessionID, "no_progress")
         if (input.toastManager && input.taskId) input.toastManager.removeTask(input.taskId)
-        return `Task stalled: subagent session ${input.sessionID} was idle for ${idleNoProgressPolls} polls with no new messages. The child likely failed (provider quota or unavailable model) without producing a response. Session ID: ${input.sessionID}`
+        return `${STALL_ERROR_PREFIX} subagent session ${input.sessionID} was idle for ${idleNoProgressPolls} polls with no new messages. The child likely failed (provider quota or unavailable model) without producing a response. Session ID: ${input.sessionID}`
       }
     }
 
@@ -236,6 +237,14 @@ export async function pollSyncSession(
     }
 
     if (!hasMessagesAfterAnchor(messages, input.anchorMessageID, input.anchorMessageCount)) continue
+
+    // Goal contract beats heuristics: an explicit done keyword from the child
+    // completes the wait even when turn-shape checks would keep polling. The
+    // keyword means the agent itself considers the objective met.
+    if (hasGoalKeywordInLatest(messages, input.anchorMessageID, input.anchorMessageCount)) {
+      log("[task] Poll complete - goal keyword detected", { sessionID: input.sessionID, pollCount })
+      break
+    }
 
     const currentAssistantId = [...messages].reverse().find((m) => m.info?.role === "assistant")?.info?.id
     const messageStateChanged =

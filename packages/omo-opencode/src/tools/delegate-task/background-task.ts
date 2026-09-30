@@ -2,7 +2,7 @@ import type { DelegateTaskArgs, ToolContextWithMetadata, DelegatedModelConfig } 
 import type { ExecutorContext, ParentContext } from "./executor-types"
 import type { FallbackEntry } from "../../shared/model-requirements"
 import { getTimingConfig } from "./timing"
-import { buildTaskPrompt } from "./prompt-builder"
+import { buildGoalSupervisedPrompt } from "./child-goal"
 import { publishToolMetadata } from "../../features/tool-metadata-store"
 import { formatDetailedError } from "./error-formatting"
 import { getSessionTools } from "../../shared/session-tools-store"
@@ -114,7 +114,7 @@ export async function executeBackgroundTask(
   try {
     const tddEnabled = executorCtx.sisyphusAgentConfig?.tdd
     const normalizedAgent = stripAgentListSortPrefix(agentToUse)
-    const effectivePrompt = buildTaskPrompt(args.prompt, normalizedAgent, tddEnabled)
+    const effectivePrompt = buildGoalSupervisedPrompt(args.prompt, normalizedAgent, tddEnabled)
     const persistedDescription = getPersistedBackgroundTaskDescription(args, normalizedAgent)
     const task = await manager.launch({
       description: persistedDescription,
